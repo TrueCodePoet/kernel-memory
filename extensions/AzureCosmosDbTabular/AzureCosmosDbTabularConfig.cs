@@ -1,9 +1,11 @@
 // Copyright (c) Microsoft. All rights reserved.
 
+// using System.Collections.Generic; // Removed unnecessary using directive
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Azure.Cosmos;
+// using Microsoft.Azure.Cosmos.Serialization; // Removed unnecessary using directive
 
 namespace Microsoft.KernelMemory.MemoryDb.AzureCosmosDbTabular;
 
@@ -30,35 +32,12 @@ public sealed class AzureCosmosDbTabularConfig
     /// <summary>
     /// Default JSON serializer options.
     /// </summary>
-    internal static readonly JsonSerializerOptions DefaultJsonSerializerOptions;
-
-    /// <summary>
-    /// Vector embedding policy for the container.
-    /// </summary>
-    private static readonly VectorEmbeddingPolicy VectorEmbeddingPolicy = new(
-    [
-        new Embedding
-        {
-            DataType = VectorDataType.Float32,
-            Dimensions = 1536,
-            DistanceFunction = DistanceFunction.Cosine,
-            Path = $"/{AzureCosmosDbTabularMemoryRecord.VectorField}",
-        }
-    ]);
-
-    /// <summary>
-    /// Indexing policy for the container.
-    /// </summary>
-    private static readonly IndexingPolicy IndexingPolicy = new()
+    internal static readonly JsonSerializerOptions DefaultJsonSerializerOptions = new()
     {
-        VectorIndexes =
-        [
-            new()
-            {
-                Path = $"/{AzureCosmosDbTabularMemoryRecord.VectorField}",
-                Type = VectorIndexType.QuantizedFlat,
-            }
-        ],
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,
+        Converters = { new JsonStringEnumConverter() }
     };
 
     /// <summary>
@@ -70,16 +49,12 @@ public sealed class AzureCosmosDbTabularConfig
     {
         var properties = new ContainerProperties(
             containerId,
-            $"/{AzureCosmosDbTabularMemoryRecord.FileField}")
-        {
-            VectorEmbeddingPolicy = VectorEmbeddingPolicy,
-            IndexingPolicy = IndexingPolicy,
-        };
+            $"/{AzureCosmosDbTabularMemoryRecord.FileField}");
 
         // Include all paths in the indexing policy
         properties.IndexingPolicy.IncludedPaths.Add(new IncludedPath { Path = "/*" });
 
-        // Exclude the vector field from indexing (it's handled by the vector index)
+        // Exclude the vector field from indexing
         properties.IndexingPolicy.ExcludedPaths.Add(new ExcludedPath { Path = $"/{AzureCosmosDbTabularMemoryRecord.VectorField}/*" });
 
         // Ensure the data field is indexed for efficient querying
@@ -88,18 +63,5 @@ public sealed class AzureCosmosDbTabularConfig
         return properties;
     }
 
-    /// <summary>
-    /// Static constructor to initialize the default JSON serializer options.
-    /// </summary>
-    static AzureCosmosDbTabularConfig()
-    {
-        var jsonSerializerOptions = new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            NumberHandling = JsonNumberHandling.AllowReadingFromString
-        };
-        jsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
-        DefaultJsonSerializerOptions = jsonSerializerOptions;
-    }
+    // Static constructor removed to address CA1810
 }

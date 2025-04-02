@@ -127,7 +127,7 @@ public sealed class TabularExcelDecoder : IContentDecoder
             {
                 // Skip row if configured to skip empty or hidden rows
                 if ((this._config.SkipEmptyRows && !row.CellsUsed().Any()) ||
-                    (this._config.SkipHiddenRows && row.IsHidden))
+                    (this._config.SkipHiddenRows && worksheet.Row(row.RowNumber()).IsHidden))
                 {
                     continue;
                 }

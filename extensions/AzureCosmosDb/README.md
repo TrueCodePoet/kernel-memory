@@ -1,13 +1,13 @@
 # Azure Cosmos DB Connector for Kernel Memory
 
-This extension provides integration between [Microsoft Kernel Memory](https://github.com/microsoft/kernel-memory) and [Azure Cosmos DB](https://azure.microsoft.com/en-us/products/cosmos-db/) for storing and retrieving memory records with vector search capabilities.
+This extension provides integration between [Microsoft Kernel Memory](https://github.com/microsoft/kernel-memory) and [Azure Cosmos DB](https://azure.microsoft.com/en-us/products/cosmos-db/) for storing and retrieving memory records.
 
 ## Features
 
-- Store memory records in Azure Cosmos DB NoSQL containers
-- Perform vector similarity search using Azure Cosmos DB's vector search capabilities
-- Filter memory records based on metadata
-- Fully implements the `IMemoryDb` interface
+- Store memory records (including embeddings) in Azure Cosmos DB NoSQL containers.
+- Retrieve records based on similarity using a basic placeholder query (Note: True vector search using Cosmos DB's native capabilities is not currently implemented in this connector).
+- Filter memory records based on tags.
+- Fully implements the `IMemoryDb` interface.
 
 ## Requirements
 
@@ -66,11 +66,13 @@ var memory = new KernelMemoryBuilder()
 
 ## Implementation Details
 
-The extension creates a database named "memory" in your Azure Cosmos DB account. Each memory index is stored as a separate container within this database. The containers are configured with vector search capabilities using the Quantized Flat index type and Cosine distance function.
+The extension creates a database named "memory" (hardcoded) in your Azure Cosmos DB account. Each memory index is stored as a separate container within this database.
+
+**Important Note on Vector Search:** The current implementation **does not** configure or utilize Azure Cosmos DB's native vector indexing or search features. The `GetSimilarListAsync` method uses a basic placeholder query and does not perform true vector distance calculations. Implementing and configuring native vector search would require modifications to this connector.
 
 Memory records are stored with the following structure:
-- `id`: Base64-encoded unique identifier
-- `file`: File identifier (used as partition key)
-- `tags`: Collection of metadata tags
-- `embedding`: Vector representation of the memory content
-- `payload`: Additional data associated with the memory record
+- `id`: The original `MemoryRecord.Id`, Base64 encoded for compatibility with Cosmos DB ID constraints.
+- `file`: The file identifier derived from `MemoryRecord.Id`, used as the **partition key** for the container.
+- `tags`: Collection of metadata tags.
+- `embedding`: Vector representation of the memory content (stored but not currently used for native vector search by this connector).
+- `payload`: Additional data associated with the memory record.

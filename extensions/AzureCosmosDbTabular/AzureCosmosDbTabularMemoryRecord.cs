@@ -1,5 +1,8 @@
 // Copyright (c) Microsoft. All rights reserved.
 
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -185,7 +188,17 @@ internal class AzureCosmosDbTabularMemoryRecord
 
                 if (extractedData != null)
                 {
-                    memoryRecord.Data = extractedData;
+                    // Create a new record with the extracted data
+                    memoryRecord = new AzureCosmosDbTabularMemoryRecord
+                    {
+                        Id = id,
+                        File = fileId,
+                        Payload = record.Payload,
+                        Tags = record.Tags,
+                        Vector = record.Vector,
+                        Data = extractedData,
+                        Source = memoryRecord.Source
+                    };
                 }
             }
             catch (JsonException ex)
@@ -205,7 +218,17 @@ internal class AzureCosmosDbTabularMemoryRecord
 
                 if (extractedSource != null)
                 {
-                    memoryRecord.Source = extractedSource;
+                    // Create a new record with the extracted source
+                    memoryRecord = new AzureCosmosDbTabularMemoryRecord
+                    {
+                        Id = id,
+                        File = fileId,
+                        Payload = record.Payload,
+                        Tags = record.Tags,
+                        Vector = record.Vector,
+                        Data = memoryRecord.Data,
+                        Source = extractedSource
+                    };
                 }
             }
             catch (JsonException ex)

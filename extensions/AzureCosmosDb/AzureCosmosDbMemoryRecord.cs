@@ -1,10 +1,14 @@
 // Copyright (c) Microsoft. All rights reserved.
 
+using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Text.Json.Serialization;
 using Microsoft.Azure.Cosmos;
 using Microsoft.KernelMemory;
 using Microsoft.KernelMemory.MemoryStorage;
+// using System.Linq; // Removed unnecessary using directive
+// using Newtonsoft.Json; // Removed unnecessary using directive
 
 using Embedding = Microsoft.KernelMemory.Embedding;
 
@@ -35,7 +39,7 @@ internal class AzureCosmosDbMemoryRecord
     [JsonConverter(typeof(Embedding.JsonConverter))]
     public Embedding Vector { get; init; }
 
-    internal PartitionKey GetPartitionKey() => new(File);
+    internal PartitionKey GetPartitionKey() => new(this.File);
 
     internal static string Columns(string? alias = default, bool withEmbeddings = false) =>
         string.Join(',', GetColumns(alias, withEmbeddings));
@@ -57,17 +61,17 @@ internal class AzureCosmosDbMemoryRecord
 
     internal MemoryRecord ToMemoryRecord(bool withEmbedding = true)
     {
-        var id = DecodeId(Id);
+        var id = DecodeId(this.Id);
         var memoryRecord = new MemoryRecord
         {
             Id = id,
-            Payload = Payload,
-            Tags = Tags
+            Payload = this.Payload,
+            Tags = this.Tags
         };
 
         if (withEmbedding)
         {
-            memoryRecord.Vector = Vector;
+            memoryRecord.Vector = this.Vector;
         }
 
         return memoryRecord;
