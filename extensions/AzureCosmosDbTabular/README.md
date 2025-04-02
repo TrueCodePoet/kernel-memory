@@ -8,7 +8,7 @@ It includes a specialized Excel decoder (`TabularExcelDecoder`) that preserves t
 
 - Store tabular data (rows from Excel, CSV, JSON) as individual records in Azure Cosmos DB.
 - Perform structured queries against tabular data fields using special filter syntax (`data.FieldName`).
-- Retrieve records based on similarity using a basic placeholder query (Note: True vector search using Cosmos DB's native capabilities is not currently implemented in this connector).
+- Retrieve records based on vector similarity using Azure Cosmos DB's native vector search capabilities (`VectorDistance` function with Cosine distance). This allows for semantic search over the tabular data content.
 - Fully implements the `IMemoryDb` interface.
 - Includes an optional specialized Excel decoder (`TabularExcelDecoder`) that:
   - Preserves column-row relationships
@@ -200,10 +200,11 @@ await memory.SaveAsync(record);
 
 ## Querying Tabular Data
 
-This extension supports two types of queries:
+This extension supports querying data in multiple ways:
 
-1. **Vector Similarity Search**: Standard semantic search using embeddings
-2. **Structured Field Queries**: Filter records based on specific field values
+1.  **Vector Similarity Search**: Perform semantic searches using vector embeddings via the `GetSimilarListAsync` method. This leverages Azure Cosmos DB's native vector search.
+2.  **Structured Field Queries**: Filter records based on specific field values within the tabular data using the special `data.` prefix in filter tags (e.g., `filter.Add("data.Environment", "Production")`).
+3.  **Hybrid Search**: Combine vector similarity search with structured field queries and standard tag filters within the same `GetSimilarListAsync` call for powerful, targeted retrieval.
 
 ### Structured Field Queries
 
@@ -246,13 +247,15 @@ var results = await memory.SearchAsync(filter: filter);
 
 The extension creates a database (default name "memory", configurable via `DatabaseName`) in your Azure Cosmos DB account. Each memory index is stored as a separate container within this database.
 
-**Important Note on Vector Search:** The current implementation **does not** configure or utilize Azure Cosmos DB's native vector indexing or search features. The `GetSimilarListAsync` method uses a basic placeholder query and does not perform true vector distance calculations. Implementing and configuring native vector search would require modifications to this connector.
+**Vector Search Implementation:** This connector utilizes Azure Cosmos DB's native vector search capabilities.
+- When an index is created (`CreateIndexAsync`), a vector index policy (Flat index, Cosine distance) is automatically configured on the `embedding` field.
+- Similarity searches (`GetSimilarListAsync`) use the `VectorDistance` function in Cosmos DB queries to perform efficient vector comparisons.
 
 Memory records are stored with the following structure:
 - `id`: The original `MemoryRecord.Id`, Base64 encoded for compatibility with Cosmos DB ID constraints.
 - `file`: The file identifier derived from `MemoryRecord.Id`, used as the **partition key** for the container.
 - `tags`: Collection of metadata tags.
-- `embedding`: Vector representation of the memory content (stored but not currently used for native vector search by this connector).
+- `embedding`: Vector representation of the memory content, indexed for vector search.
 - `data`: Tabular data extracted from the `tabular_data` payload field, stored as key-value pairs.
 - `source`: Source information extracted from the `source_info` payload field (e.g., sheet name, row number).
 - `payload`: The original payload dictionary associated with the memory record (excluding `tabular_data` and `source_info` if they were processed).

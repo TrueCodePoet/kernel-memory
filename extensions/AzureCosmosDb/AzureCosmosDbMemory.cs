@@ -42,9 +42,33 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
     public async Task CreateIndexAsync(string index, int vectorSize, CancellationToken cancellationToken = default)
     {
         var databaseResponse = await this._cosmosClient
-            .CreateDatabaseIfNotExistsAsync(DatabaseName, cancellationToken: cancellationToken).ConfigureAwait(false);
+             .CreateDatabaseIfNotExistsAsync(DatabaseName, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var containerProperties = AzureCosmosDbConfig.GetContainerProperties(index);
+
+        // Define and add the vector index policy dynamically
+        containerProperties.IndexingPolicy.ExcludedPaths.Remove(new ExcludedPath { Path = $"/{AzureCosmosDbMemoryRecord.VectorField}/*" }); // Remove exclusion if it exists
+
+        // Add the vector index definition using the correct structure
+        containerProperties.IndexingPolicy.VectorIndexes.Add(new VectorIndexPath
+        {
+            Path = $"/{AzureCosmosDbMemoryRecord.VectorField}",
+            Type = VectorIndexType.Flat // Using Flat index type. Consider HNSW for larger datasets if needed.
+            // Note: Dimensions and DistanceFunction are often part of the query, not the index definition itself in newer SDKs/APIs,
+            // but let's stick to the example structure for now. If DistanceFunction is needed here, it would be on VectorIndexSpec if that class were used.
+            // The VectorDistance function in the query implicitly uses the distance metric (Cosine by default or specified).
+        });
+
+        // Ensure the VectorEmbeddingPolicy is set (as per the example, though its exact role might differ slightly across minor versions)
+        // We might not need a separate EmbeddingPath/VectorIndexSpec if VectorIndexPath is sufficient.
+        // Let's try setting the policy directly on ContainerProperties if available, or skip if VectorIndexes is the primary mechanism.
+        // Based on the example, it seems VectorEmbeddingPolicy might be set directly on ContainerProperties, not IndexingPolicy.
+        // Let's adjust based on the example structure:
+        // containerProperties.VectorEmbeddingPolicy = new VectorEmbeddingPolicy(new Collection<Embedding>(...)); // This seems complex and might not be needed just for index definition.
+
+        // Let's stick to modifying the IndexingPolicy as it's the most common place.
+        // If VectorIndexes.Add is the correct way, the previous VectorEmbeddingPolicies lines were incorrect.
+
         var containerResponse = await databaseResponse.Database.CreateContainerIfNotExistsAsync(
             containerProperties,
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -107,27 +131,35 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
         bool withEmbeddings = false,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var textEmbedding = await this._embeddingGenerator.GenerateEmbeddingAsync(text, cancellationToken).ConfigureAwait(false);
+        // Generate the embedding for the query text
+        var queryEmbedding = await this._embeddingGenerator.GenerateEmbeddingAsync(text, cancellationToken).ConfigureAwait(false);
 
-        var (whereCondition, parameters) = WithTags("c", filters);
+        // Prepare tag filters
+        var (whereCondition, filterParameters) = WithTags("c", filters);
 
-        // Note: This is a simplified query that doesn't use vector search
-        // In a real implementation, you would use the VectorDistance function
+        // Construct the vector search query
+        // Select the document fields and the calculated vector distance as SimilarityScore
         var sql = $"""
-                   SELECT Top @topN
-                     {AzureCosmosDbMemoryRecord.Columns("c", withEmbeddings)}
-                   FROM 
-                     c
+                   SELECT TOP @limit
+                     {AzureCosmosDbMemoryRecord.Columns("c", withEmbeddings)}, VectorDistance(c.{AzureCosmosDbMemoryRecord.VectorField}, @queryEmbedding) AS SimilarityScore
+                   FROM c
                    {whereCondition}
-                   """;
+                   ORDER BY VectorDistance(c.{AzureCosmosDbMemoryRecord.VectorField}, @queryEmbedding) ASC
+                   """; // ASC order because lower distance means higher similarity
 
         var queryDefinition = new QueryDefinition(sql)
-            .WithParameter("@topN", limit);
-        foreach (var (name, value) in parameters)
+            .WithParameter("@limit", limit)
+            .WithParameter("@queryEmbedding", queryEmbedding.Data.ToArray()); // Pass embedding as parameter
+
+        // Add filter parameters
+        foreach (var (name, value) in filterParameters)
         {
-            queryDefinition.WithParameter(name, value);
+            queryDefinition = queryDefinition.WithParameter(name, value);
         }
 
+        this._logger.LogTrace("Executing vector search query: {Query}", queryDefinition.QueryText);
+
+        // Execute the query
         using var feedIterator = this._cosmosClient
             .GetDatabase(DatabaseName)
             .GetContainer(index)
@@ -138,11 +170,22 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
             var response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
             foreach (var memoryRecord in response)
             {
-                this._logger.LogDebug("{Id}  {SimilarityScore}", memoryRecord.Id, memoryRecord.SimilarityScore);
-                var relevanceScore = (memoryRecord.SimilarityScore + 1) / 2;
+                // Convert Cosine distance (0 to 2) to relevance score (1 to 0)
+                // Cosine Similarity = (2 - Cosine Distance) / 2
+                // We use the distance directly for filtering, then convert for the final result.
+                // Note: SimilarityScore here is actually the Cosine Distance from the query.
+                double cosineDistance = memoryRecord.SimilarityScore;
+                double relevanceScore = (2.0 - cosineDistance) / 2.0;
+
+                this._logger.LogDebug("ID: {Id}, Distance: {Distance}, Relevance: {Relevance}", memoryRecord.Id, cosineDistance, relevanceScore);
+
                 if (relevanceScore >= minRelevance)
                 {
                     yield return (memoryRecord.ToMemoryRecord(withEmbeddings), relevanceScore);
+                }
+                else
+                {
+                    this._logger.LogDebug("ID: {Id} filtered out by minRelevance ({Relevance} < {MinRelevance})", memoryRecord.Id, relevanceScore, minRelevance);
                 }
             }
         }

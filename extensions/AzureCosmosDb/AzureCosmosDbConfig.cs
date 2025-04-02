@@ -2,9 +2,11 @@
 
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Azure.Cosmos;
+using Microsoft.Azure.Cosmos; // Already present, but ensuring it's clear
 using Microsoft.Azure.Cosmos.Serialization;
 
 namespace Microsoft.KernelMemory.MemoryDb.AzureCosmosDb;
@@ -33,7 +35,7 @@ public sealed class AzureCosmosDbConfig
 
         // Configure indexing policy
         properties.IndexingPolicy.IncludedPaths.Add(new IncludedPath { Path = "/*" });
-        properties.IndexingPolicy.ExcludedPaths.Add(new ExcludedPath { Path = $"/{AzureCosmosDbMemoryRecord.VectorField}/*" });
+        properties.IndexingPolicy.ExcludedPaths.Add(new ExcludedPath { Path = $"/{AzureCosmosDbMemoryRecord.VectorField}/*" }); // Keep vector field excluded here, will handle in CreateIndexAsync
 
         return properties;
     }

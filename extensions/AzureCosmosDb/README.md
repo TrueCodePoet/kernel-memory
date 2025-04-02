@@ -5,7 +5,7 @@ This extension provides integration between [Microsoft Kernel Memory](https://gi
 ## Features
 
 - Store memory records (including embeddings) in Azure Cosmos DB NoSQL containers.
-- Retrieve records based on similarity using a basic placeholder query (Note: True vector search using Cosmos DB's native capabilities is not currently implemented in this connector).
+- Retrieve records based on vector similarity using Azure Cosmos DB's native vector search capabilities (`VectorDistance` function with Cosine distance).
 - Filter memory records based on tags.
 - Fully implements the `IMemoryDb` interface.
 
@@ -68,11 +68,13 @@ var memory = new KernelMemoryBuilder()
 
 The extension creates a database named "memory" (hardcoded) in your Azure Cosmos DB account. Each memory index is stored as a separate container within this database.
 
-**Important Note on Vector Search:** The current implementation **does not** configure or utilize Azure Cosmos DB's native vector indexing or search features. The `GetSimilarListAsync` method uses a basic placeholder query and does not perform true vector distance calculations. Implementing and configuring native vector search would require modifications to this connector.
+**Vector Search Implementation:** This connector utilizes Azure Cosmos DB's native vector search capabilities.
+- When an index is created (`CreateIndexAsync`), a vector index policy (Flat index, Cosine distance) is automatically configured on the `embedding` field.
+- Similarity searches (`GetSimilarListAsync`) use the `VectorDistance` function in Cosmos DB queries to perform efficient vector comparisons.
 
 Memory records are stored with the following structure:
 - `id`: The original `MemoryRecord.Id`, Base64 encoded for compatibility with Cosmos DB ID constraints.
 - `file`: The file identifier derived from `MemoryRecord.Id`, used as the **partition key** for the container.
 - `tags`: Collection of metadata tags.
-- `embedding`: Vector representation of the memory content (stored but not currently used for native vector search by this connector).
+- `embedding`: Vector representation of the memory content, indexed for vector search.
 - `payload`: Additional data associated with the memory record.
