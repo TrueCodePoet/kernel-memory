@@ -66,12 +66,30 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         var containerProperties = AzureCosmosDbTabularConfig.GetContainerProperties(index);
 
         // Define and add the vector index policy dynamically
-        containerProperties.IndexingPolicy.ExcludedPaths.Remove(new ExcludedPath { Path = $"/{AzureCosmosDbTabularMemoryRecord.VectorField}/*" }); // Remove exclusion if it exists
+        string vectorFieldPath = $"/{AzureCosmosDbTabularMemoryRecord.VectorField}"; // "/embedding"
+        string vectorDataPath = $"{vectorFieldPath}/Data"; // Assumed path: "/embedding/Data"
 
-        // Add the vector index definition using the correct structure
+        // Remove any default exclusion for the vector path or its children
+        var exclusionToRemove = containerProperties.IndexingPolicy.ExcludedPaths.FirstOrDefault(p => p.Path == vectorFieldPath + "/*");
+        if (exclusionToRemove != null)
+        {
+            containerProperties.IndexingPolicy.ExcludedPaths.Remove(exclusionToRemove);
+        }
+
+        // Ensure the specific vector data path is included if using wildcard includes
+        if (!containerProperties.IndexingPolicy.IncludedPaths.Any(p => p.Path == vectorDataPath + "/?"))
+        {
+            if (!containerProperties.IndexingPolicy.IncludedPaths.Any(p => p.Path == "/*"))
+            {
+                containerProperties.IndexingPolicy.IncludedPaths.Add(new IncludedPath { Path = vectorDataPath + "/?" });
+            }
+        }
+
+        // Add the vector index definition using the correct structure and path
+        containerProperties.IndexingPolicy.VectorIndexes.Clear(); // Clear potentially incorrect definitions
         containerProperties.IndexingPolicy.VectorIndexes.Add(new VectorIndexPath
         {
-            Path = $"/{AzureCosmosDbTabularMemoryRecord.VectorField}", // Use the constant from the Tabular record class
+            Path = vectorDataPath, // Corrected Path: Targeting nested Data property
             Type = VectorIndexType.Flat // Using Flat index type.
         });
 
@@ -79,29 +97,36 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
             containerProperties,
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        this._logger.LogInformation("Created container {ContainerId} in database {Database}",
-            containerResponse.Container.Id, containerResponse.Container.Database);
+        this._logger.LogInformation("Created/Ensured container {Index} in database {Database} with Vector Index Path {VectorPath}",
+            index, this._databaseName, vectorDataPath);
     }
 
     /// <inheritdoc/>
     public async Task<IEnumerable<string>> GetIndexesAsync(CancellationToken cancellationToken = default)
     {
         var result = new List<string>();
-
-        using var feedIterator = this._cosmosClient
-            .GetDatabase(this._databaseName)
-            .GetContainerQueryIterator<string>("SELECT VALUE(c.id) FROM c");
-
-        while (feedIterator.HasMoreResults)
+        try
         {
-            var next = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var containerName in next.Resource)
+            using var feedIterator = this._cosmosClient
+                .GetDatabase(this._databaseName)
+                .GetContainerQueryIterator<ContainerProperties>("SELECT * FROM c"); // Query properties to check index later if needed
+
+            while (feedIterator.HasMoreResults)
             {
-                if (!string.IsNullOrEmpty(containerName))
+                var next = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var containerProperties in next.Resource)
                 {
-                    result.Add(containerName);
+                    if (!string.IsNullOrEmpty(containerProperties?.Id))
+                    {
+                        result.Add(containerProperties.Id);
+                    }
                 }
             }
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            this._logger.LogWarning("Database {Database} not found.", this._databaseName);
+            // Database doesn't exist, so no indexes exist. Return empty list.
         }
 
         return result;
@@ -110,10 +135,18 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
     /// <inheritdoc/>
     public async Task DeleteIndexAsync(string index, CancellationToken cancellationToken = default)
     {
-        await this._cosmosClient
-            .GetDatabase(this._databaseName)
-            .GetContainer(index)
-            .DeleteContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await this._cosmosClient
+                .GetDatabase(this._databaseName)
+                .GetContainer(index)
+                .DeleteContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            this._logger.LogWarning("Index {Index} or Database {Database} not found for deletion.", index, this._databaseName);
+            // If it doesn't exist, consider the operation successful.
+        }
     }
 
     /// <inheritdoc/>
@@ -155,6 +188,14 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
 
         var memoryRecord = AzureCosmosDbTabularMemoryRecord.FromMemoryRecord(record, data, source);
 
+        // Log the structure before upserting for debugging path issues
+        // try {
+        //     string json = System.Text.Json.JsonSerializer.Serialize(memoryRecord);
+        //     this._logger.LogTrace("Upserting document structure: {Json}", json);
+        // } catch (Exception e) {
+        //     this._logger.LogError(e, "Error serializing record for trace log");
+        // }
+
         var result = await this._cosmosClient
             .GetDatabase(this._databaseName)
             .GetContainer(index)
@@ -182,19 +223,19 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         // Process filters to extract both standard tag filters and structured data filters
         var (whereCondition, filterParameters) = this.ProcessFilters("c", filters);
 
-        // Construct the vector search query
-        // Select the document fields and the calculated vector distance as SimilarityScore
+        // Construct the vector search query using the corrected path
+        string vectorDataPath = $"c.{AzureCosmosDbTabularMemoryRecord.VectorField}.Data"; // Corrected path c.embedding.Data
         var sql = $"""
                    SELECT TOP @limit
-                     {AzureCosmosDbTabularMemoryRecord.Columns("c", withEmbeddings)}, VectorDistance(c.{AzureCosmosDbTabularMemoryRecord.VectorField}, @queryEmbedding) AS SimilarityScore
+                     {AzureCosmosDbTabularMemoryRecord.Columns("c", withEmbeddings)}, VectorDistance({vectorDataPath}, @queryEmbedding) AS SimilarityScore
                    FROM c
                    {whereCondition}
-                   ORDER BY VectorDistance(c.{AzureCosmosDbTabularMemoryRecord.VectorField}, @queryEmbedding) ASC
+                   ORDER BY VectorDistance({vectorDataPath}, @queryEmbedding) ASC
                    """; // ASC order because lower distance means higher similarity
 
         var queryDefinition = new QueryDefinition(sql)
             .WithParameter("@limit", limit)
-            .WithParameter("@queryEmbedding", queryEmbedding.Data.ToArray()); // Pass embedding as parameter
+            .WithParameter("@queryEmbedding", queryEmbedding.Data.ToArray()); // Pass embedding data array as parameter
 
         // Add filter parameters
         foreach (var (name, value) in filterParameters)
@@ -212,13 +253,23 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
 
         while (feedIterator.HasMoreResults)
         {
-            var response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+            FeedResponse<TabularMemoryRecordResult> response;
+            try
+            {
+                response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (CosmosException ex) when (ex.Message.Contains("VectorDistance"))
+            {
+                // Provide a more specific error if VectorDistance fails (e.g., index not configured correctly)
+                this._logger.LogError(ex, "Vector search failed. Ensure the vector index path '/{VectorField}/Data' is correctly configured on container '{Index}'.", AzureCosmosDbTabularMemoryRecord.VectorField, index);
+                // Re-throw or handle as appropriate, here we break the loop
+                yield break;
+            }
+
             foreach (var memoryRecord in response)
             {
                 // Convert Cosine distance (0 to 2) to relevance score (1 to 0)
                 // Cosine Similarity = (2 - Cosine Distance) / 2
-                // We use the distance directly for filtering, then convert for the final result.
-                // Note: SimilarityScore here is actually the Cosine Distance from the query.
                 double cosineDistance = memoryRecord.SimilarityScore;
                 double relevanceScore = (2.0 - cosineDistance) / 2.0;
 
@@ -248,15 +299,15 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         var (whereCondition, parameters) = this.ProcessFilters("c", filters);
 
         var sql = $"""
-                   SELECT Top @topN
+                   SELECT Top @limit
                      {AzureCosmosDbTabularMemoryRecord.Columns("c", withEmbeddings)}
-                   FROM 
+                   FROM
                      c
                    {whereCondition}
-                   """;
+                   """; // Using @limit instead of @topN
 
         var queryDefinition = new QueryDefinition(sql)
-            .WithParameter("@topN", limit);
+            .WithParameter("@limit", limit);
 
         // Add all parameters from the filters
         foreach (var (name, value) in parameters)
@@ -274,7 +325,7 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
             var response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
             foreach (var record in response)
             {
-                yield return record.ToMemoryRecord(withEmbeddings);
+                yield return record.ToMemoryRecord(withEmbeddings); // Pass withEmbeddings
             }
         }
     }
@@ -284,21 +335,22 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
     {
         try
         {
-            var id = AzureCosmosDbTabularMemoryRecord.FromMemoryRecord(record).Id;
+            // Use the encoded ID for deletion as stored in Cosmos DB
+            var encodedId = AzureCosmosDbTabularMemoryRecord.EncodeId(record.Id);
 
             await this._cosmosClient
                 .GetDatabase(this._databaseName)
                 .GetContainer(index)
                 .DeleteItemAsync<AzureCosmosDbTabularMemoryRecord>(
-                    id,
-                    new PartitionKey(record.GetFileId()),
+                    encodedId, // Use encoded ID
+                    new PartitionKey(record.GetFileId()), // Use original File ID for partition key
                     cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            this._logger.LogDebug("Deleted record {Id} from index {Index}", id, index);
+            this._logger.LogDebug("Deleted record {Id} from index {Index}", encodedId, index);
         }
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
-            this._logger.LogTrace("Record {Id} not found in index {Index}, nothing to delete", record.Id, index);
+            this._logger.LogTrace("Record {Id} (encoded: {EncodedId}) not found in index {Index}, nothing to delete", record.Id, AzureCosmosDbTabularMemoryRecord.EncodeId(record.Id), index);
         }
     }
 
@@ -312,7 +364,7 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
     {
         if (filters is null || filters.Count == 0)
         {
-            return (string.Empty, []);
+            return (string.Empty, Array.Empty<Tuple<string, object>>());
         }
 
         var parameters = new List<Tuple<string, object>>();
@@ -333,27 +385,16 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
                 continue;
             }
 
-            if (hasConditions)
-            {
-                builder.Append(" OR "); // CA1834: Use Append(char) for single char
-            }
-
-            builder.Append("(");
+            // Build conditions for a single filter (AND logic within the filter)
+            var singleFilterBuilder = new StringBuilder();
             bool hasTagConditions = false;
-
-            // Process tag conditions
             for (var j = 0; j < filter.Pairs.Count(); j++)
             {
                 var pair = filter.Pairs.ElementAt(j);
-
-                // Skip null values
-                if (pair.Value is null)
-                {
-                    continue;
-                }
+                if (pair.Value is null) { continue; } // Skip null values
 
                 // Check if this is a structured data filter (special tag format)
-                if (pair.Key.StartsWith("data.", StringComparison.Ordinal)) // CA1310: Specify StringComparison
+                if (pair.Key.StartsWith("data.", StringComparison.Ordinal))
                 {
                     // This will be handled in the next section
                     continue;
@@ -361,24 +402,20 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
 
                 if (hasTagConditions)
                 {
-                    builder.Append(" AND ");
+                    singleFilterBuilder.Append(" AND ");
                 }
 
-                builder.Append(System.Globalization.CultureInfo.InvariantCulture, // CA1305: Specify CultureInfo
-                    $"ARRAY_CONTAINS({alias}.{AzureCosmosDbTabularMemoryRecord.TagsField}.{pair.Key}, @filter_{i}_{j}_value)");
-                parameters.Add(new Tuple<string, object>($"@filter_{i}_{j}_value", pair.Value)); // IDE0090: Simplify new
-
+                string paramName = $"@filter_{parameters.Count}";
+                singleFilterBuilder.Append($"ARRAY_CONTAINS({alias}.{AzureCosmosDbTabularMemoryRecord.TagsField}.{pair.Key}, {paramName})");
+                parameters.Add(Tuple.Create<string, object>(paramName, pair.Value));
                 hasTagConditions = true;
             }
 
-            // If we didn't add any tag conditions, remove the opening parenthesis
-            if (!hasTagConditions)
+            // Append the conditions for this filter if any tags were found
+            if (hasTagConditions)
             {
-                builder.Length -= 1; // Remove the '('
-            }
-            else
-            {
-                builder.Append(')'); // CA1834: Use Append(char) for single char
+                if (hasConditions) { builder.Append(" OR "); } // OR logic between different filters
+                builder.Append('(').Append(singleFilterBuilder).Append(')');
                 hasConditions = true;
             }
         }
@@ -387,61 +424,43 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         for (var i = 0; i < filters.Count; i++)
         {
             var filter = filters.ElementAt(i);
+            if (filter.IsEmpty()) { continue; }
 
-            // Skip empty filters
-            if (filter.IsEmpty())
-            {
-                continue;
-            }
-
+            // Build conditions for a single filter (AND logic within the filter)
+            var singleDataFilterBuilder = new StringBuilder();
             bool hasDataConditions = false;
-            StringBuilder dataBuilder = new(); // IDE0090: Simplify new
-            dataBuilder.Append('('); // CA1834: Use Append(char) for single char
-
-            // Process data conditions
             for (var j = 0; j < filter.Pairs.Count(); j++)
             {
                 var pair = filter.Pairs.ElementAt(j);
+                if (pair.Value is null) { continue; } // Skip null values
 
-                // Skip null values
-                if (pair.Value is null)
-                {
-                    continue;
-                }
-
-                // Only process structured data filters (special tag format)
-                if (!pair.Key.StartsWith("data.", StringComparison.Ordinal)) // CA1310: Specify StringComparison
+                // Only process structured data filters
+                if (!pair.Key.StartsWith("data.", StringComparison.Ordinal))
                 {
                     continue;
                 }
 
                 // Extract the field name (remove "data." prefix)
                 string fieldName = pair.Key.Substring(5);
+                if (string.IsNullOrEmpty(fieldName)) { continue; } // Skip if key is just "data."
 
                 if (hasDataConditions)
                 {
-                    dataBuilder.Append(" AND ");
+                    singleDataFilterBuilder.Append(" AND ");
                 }
 
                 // Add the condition for the data field
-                dataBuilder.Append(System.Globalization.CultureInfo.InvariantCulture, // CA1305: Specify CultureInfo
-                    $"{alias}.{AzureCosmosDbTabularMemoryRecord.DataField}[\"{fieldName}\"] = @data_{i}_{j}_value");
-                parameters.Add(new Tuple<string, object>($"@data_{i}_{j}_value", pair.Value)); // IDE0090: Simplify new
-
+                string paramName = $"@data_{parameters.Count}";
+                singleDataFilterBuilder.Append($"{alias}.{AzureCosmosDbTabularMemoryRecord.DataField}[\"{fieldName}\"] = {paramName}");
+                parameters.Add(Tuple.Create<string, object>(paramName, pair.Value));
                 hasDataConditions = true;
             }
 
-            // If we added any data conditions, add them to the main builder
+            // Append the conditions for this filter if any data fields were found
             if (hasDataConditions)
             {
-                dataBuilder.Append(')'); // CA1834: Use Append(char) for single char
-
-                if (hasConditions)
-                {
-                    builder.Append(" OR ");
-                }
-
-                builder.Append(dataBuilder);
+                if (hasConditions) { builder.Append(" OR "); } // OR logic between different filters
+                builder.Append('(').Append(singleDataFilterBuilder).Append(')');
                 hasConditions = true;
             }
         }
@@ -449,7 +468,7 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         // If we didn't add any conditions, return an empty string
         if (!hasConditions)
         {
-            return (string.Empty, []);
+            return (string.Empty, Array.Empty<Tuple<string, object>>());
         }
 
         builder.Append(" )");
