@@ -11,19 +11,21 @@ using System.Threading.Tasks;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Logging;
 using Microsoft.KernelMemory;
-using Microsoft.KernelMemory.AI; // Added back necessary using directive
+using Microsoft.KernelMemory.AI;
 using Microsoft.KernelMemory.MemoryStorage;
 
 namespace Microsoft.KernelMemory.MemoryDb.AzureCosmosDb;
 
+// Internal class to handle the query result including the similarity score
 internal sealed class MemoryRecordResult : AzureCosmosDbMemoryRecord
 {
+    // SimilarityScore is populated by the VectorDistance function in the query
     public double SimilarityScore { get; init; }
 }
 
 internal sealed class AzureCosmosDbMemory : IMemoryDb
 {
-    private const string DatabaseName = "memory";
+    private const string DatabaseName = "memory"; // Consider making this configurable
 
     private readonly CosmosClient _cosmosClient;
     private readonly ITextEmbeddingGenerator _embeddingGenerator;
@@ -47,53 +49,69 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
         var containerProperties = AzureCosmosDbConfig.GetContainerProperties(index);
 
         // Define and add the vector index policy dynamically
-        containerProperties.IndexingPolicy.ExcludedPaths.Remove(new ExcludedPath { Path = $"/{AzureCosmosDbMemoryRecord.VectorField}/*" }); // Remove exclusion if it exists
+        string vectorFieldPath = $"/{AzureCosmosDbMemoryRecord.VectorField}"; // "/embedding"
+        string vectorDataPath = $"{vectorFieldPath}/Data"; // Assumed path: "/embedding/Data"
 
-        // Add the vector index definition using the correct structure
+        // Remove any default exclusion for the vector path or its children
+        // Iterate and remove the specific exclusion path if it exists
+        var exclusionToRemove = containerProperties.IndexingPolicy.ExcludedPaths.FirstOrDefault(p => p.Path == vectorFieldPath + "/*");
+        if (exclusionToRemove != null)
+        {
+            containerProperties.IndexingPolicy.ExcludedPaths.Remove(exclusionToRemove);
+        }
+
+        // Ensure the specific vector data path is included if using wildcard includes
+        // If "/*" is included, this might not be strictly necessary, but explicit is safer.
+        if (!containerProperties.IndexingPolicy.IncludedPaths.Any(p => p.Path == vectorDataPath + "/?"))
+        {
+            // Check if root wildcard exists, if not, add specific path
+            if (!containerProperties.IndexingPolicy.IncludedPaths.Any(p => p.Path == "/*"))
+            {
+                containerProperties.IndexingPolicy.IncludedPaths.Add(new IncludedPath { Path = vectorDataPath + "/?" });
+            }
+        }
+
+        // Add the vector index definition using the correct structure and path
+        containerProperties.IndexingPolicy.VectorIndexes.Clear(); // Clear any potentially incorrect definitions first
         containerProperties.IndexingPolicy.VectorIndexes.Add(new VectorIndexPath
         {
-            Path = $"/{AzureCosmosDbMemoryRecord.VectorField}",
+            Path = vectorDataPath, // Corrected Path: Targeting nested Data property
             Type = VectorIndexType.Flat // Using Flat index type. Consider HNSW for larger datasets if needed.
-            // Note: Dimensions and DistanceFunction are often part of the query, not the index definition itself in newer SDKs/APIs,
-            // but let's stick to the example structure for now. If DistanceFunction is needed here, it would be on VectorIndexSpec if that class were used.
-            // The VectorDistance function in the query implicitly uses the distance metric (Cosine by default or specified).
         });
-
-        // Ensure the VectorEmbeddingPolicy is set (as per the example, though its exact role might differ slightly across minor versions)
-        // We might not need a separate EmbeddingPath/VectorIndexSpec if VectorIndexPath is sufficient.
-        // Let's try setting the policy directly on ContainerProperties if available, or skip if VectorIndexes is the primary mechanism.
-        // Based on the example, it seems VectorEmbeddingPolicy might be set directly on ContainerProperties, not IndexingPolicy.
-        // Let's adjust based on the example structure:
-        // containerProperties.VectorEmbeddingPolicy = new VectorEmbeddingPolicy(new Collection<Embedding>(...)); // This seems complex and might not be needed just for index definition.
-
-        // Let's stick to modifying the IndexingPolicy as it's the most common place.
-        // If VectorIndexes.Add is the correct way, the previous VectorEmbeddingPolicies lines were incorrect.
 
         var containerResponse = await databaseResponse.Database.CreateContainerIfNotExistsAsync(
             containerProperties,
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        this._logger.LogInformation("{Database} {ContainerId}", containerResponse.Container.Database, containerResponse.Container.Id);
+        this._logger.LogInformation("Created/Ensured container {Index} in database {Database} with Vector Index Path {VectorPath}",
+            index, DatabaseName, vectorDataPath);
     }
 
     public async Task<IEnumerable<string>> GetIndexesAsync(CancellationToken cancellationToken = default)
     {
         var result = new List<string>();
-
-        using var feedIterator = this._cosmosClient
-            .GetDatabase(DatabaseName)
-            .GetContainerQueryIterator<string>("SELECT VALUE(c.id) FROM c");
-
-        while (feedIterator.HasMoreResults)
+        try
         {
-            var next = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var containerName in next.Resource)
+            using var feedIterator = this._cosmosClient
+                .GetDatabase(DatabaseName)
+                .GetContainerQueryIterator<ContainerProperties>("SELECT * FROM c");
+
+            while (feedIterator.HasMoreResults)
             {
-                if (!string.IsNullOrEmpty(containerName))
+                var next = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var containerProperties in next.Resource)
                 {
-                    result.Add(containerName);
+                    if (!string.IsNullOrEmpty(containerProperties?.Id))
+                    {
+                        result.Add(containerProperties.Id);
+                    }
                 }
             }
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            this._logger.LogWarning("Database {Database} not found.", DatabaseName);
+            // Database doesn't exist, so no indexes exist. Return empty list.
         }
 
         return result;
@@ -101,15 +119,31 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
 
     public async Task DeleteIndexAsync(string index, CancellationToken cancellationToken = default)
     {
-        await this._cosmosClient
-            .GetDatabase(DatabaseName)
-            .GetContainer(index)
-            .DeleteContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await this._cosmosClient
+                .GetDatabase(DatabaseName)
+                .GetContainer(index)
+                .DeleteContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            this._logger.LogWarning("Index {Index} or Database {Database} not found for deletion.", index, DatabaseName);
+            // If it doesn't exist, consider the operation successful.
+        }
     }
 
     public async Task<string> UpsertAsync(string index, MemoryRecord record, CancellationToken cancellationToken = default)
     {
         var memoryRecord = AzureCosmosDbMemoryRecord.FromMemoryRecord(record);
+
+        // Log the structure before upserting for debugging path issues
+        // try {
+        //     string json = System.Text.Json.JsonSerializer.Serialize(memoryRecord);
+        //     this._logger.LogTrace("Upserting document structure: {Json}", json);
+        // } catch (Exception e) {
+        //     this._logger.LogError(e, "Error serializing record for trace log");
+        // }
 
         var result = await this._cosmosClient
             .GetDatabase(DatabaseName)
@@ -137,19 +171,19 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
         // Prepare tag filters
         var (whereCondition, filterParameters) = WithTags("c", filters);
 
-        // Construct the vector search query
-        // Select the document fields and the calculated vector distance as SimilarityScore
+        // Construct the vector search query using the corrected path
+        string vectorDataPath = $"c.{AzureCosmosDbMemoryRecord.VectorField}.Data"; // Corrected path c.embedding.Data
         var sql = $"""
                    SELECT TOP @limit
-                     {AzureCosmosDbMemoryRecord.Columns("c", withEmbeddings)}, VectorDistance(c.{AzureCosmosDbMemoryRecord.VectorField}, @queryEmbedding) AS SimilarityScore
+                     {AzureCosmosDbMemoryRecord.Columns("c", withEmbeddings)}, VectorDistance({vectorDataPath}, @queryEmbedding) AS SimilarityScore
                    FROM c
                    {whereCondition}
-                   ORDER BY VectorDistance(c.{AzureCosmosDbMemoryRecord.VectorField}, @queryEmbedding) ASC
+                   ORDER BY VectorDistance({vectorDataPath}, @queryEmbedding) ASC
                    """; // ASC order because lower distance means higher similarity
 
         var queryDefinition = new QueryDefinition(sql)
             .WithParameter("@limit", limit)
-            .WithParameter("@queryEmbedding", queryEmbedding.Data.ToArray()); // Pass embedding as parameter
+            .WithParameter("@queryEmbedding", queryEmbedding.Data.ToArray()); // Pass embedding data array as parameter
 
         // Add filter parameters
         foreach (var (name, value) in filterParameters)
@@ -167,13 +201,23 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
 
         while (feedIterator.HasMoreResults)
         {
-            var response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+            FeedResponse<MemoryRecordResult> response;
+            try
+            {
+                response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (CosmosException ex) when (ex.Message.Contains("VectorDistance"))
+            {
+                // Provide a more specific error if VectorDistance fails (e.g., index not configured correctly)
+                this._logger.LogError(ex, "Vector search failed. Ensure the vector index path '/{VectorField}/Data' is correctly configured on container '{Index}'.", AzureCosmosDbMemoryRecord.VectorField, index);
+                // Re-throw or handle as appropriate, here we break the loop
+                yield break;
+            }
+
             foreach (var memoryRecord in response)
             {
                 // Convert Cosine distance (0 to 2) to relevance score (1 to 0)
                 // Cosine Similarity = (2 - Cosine Distance) / 2
-                // We use the distance directly for filtering, then convert for the final result.
-                // Note: SimilarityScore here is actually the Cosine Distance from the query.
                 double cosineDistance = memoryRecord.SimilarityScore;
                 double relevanceScore = (2.0 - cosineDistance) / 2.0;
 
@@ -201,18 +245,18 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
         var (whereCondition, parameters) = WithTags("c", filters);
 
         var sql = $"""
-                   SELECT Top @topN
+                   SELECT Top @limit
                      {AzureCosmosDbMemoryRecord.Columns("c", withEmbeddings)}
-                   FROM 
+                   FROM
                      c
                    {whereCondition}
-                   """;
+                   """; // Using @limit instead of @topN for consistency
 
         var queryDefinition = new QueryDefinition(sql)
-            .WithParameter("@topN", limit);
+            .WithParameter("@limit", limit);
         foreach (var (name, value) in parameters)
         {
-            queryDefinition.WithParameter(name, value);
+            queryDefinition = queryDefinition.WithParameter(name, value);
         }
 
         using var feedIterator = this._cosmosClient
@@ -224,68 +268,77 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
             var response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
             foreach (var record in response)
             {
-                yield return record.ToMemoryRecord();
+                yield return record.ToMemoryRecord(withEmbeddings); // Pass withEmbeddings
             }
         }
     }
 
+    // Helper method to build the WHERE clause for tag filtering
     private static (string, IReadOnlyCollection<Tuple<string, object>>) WithTags(string alias, ICollection<MemoryFilter>? filters = null)
     {
         if (filters is null || filters.Count == 0)
         {
-            return (string.Empty, []);
+            return (string.Empty, Array.Empty<Tuple<string, object>>());
         }
 
         var parameters = new List<Tuple<string, object>>();
-        var builder = new StringBuilder();
-        builder.Append("WHERE ( ");
+        var queryBuilder = new StringBuilder();
 
-        for (var i = 0; i < filters.Count; i++)
+        bool firstFilter = true;
+        foreach (var filter in filters)
         {
-            var filter = filters.ElementAt(i);
+            if (filter.IsEmpty()) { continue; }
 
-            if (i > 0)
+            if (!firstFilter)
             {
-                builder.Append(" OR ");
+                queryBuilder.Append(" OR ");
             }
 
-            for (var j = 0; j < filter.Pairs.Count(); j++)
+            queryBuilder.Append('(');
+            bool firstPair = true;
+            foreach (var value in filter)
             {
-                var value = filter.Pairs.ElementAt(j);
-                if (value.Value is null)
+                if (value.Value is null) { continue; } // Skip null values
+
+                if (!firstPair)
                 {
-                    continue;
+                    queryBuilder.Append(" AND ");
                 }
 
-                if (j > 0)
-                {
-                    builder.Append(" AND ");
-                }
-
-                builder.Append(System.Globalization.CultureInfo.InvariantCulture,
-                    $"ARRAY_CONTAINS({alias}.{AzureCosmosDbMemoryRecord.TagsField}.{value.Key}, @filter_{i}_{j}_value)");
-                parameters.Add(new Tuple<string, object>($"@filter_{i}_{j}_value", value.Value));
+                string paramName = $"@filter_{parameters.Count}";
+                queryBuilder.Append($"ARRAY_CONTAINS({alias}.{AzureCosmosDbMemoryRecord.TagsField}.{value.Key}, {paramName})");
+                parameters.Add(Tuple.Create<string, object>(paramName, value.Value));
+                firstPair = false;
             }
+            queryBuilder.Append(')');
+            firstFilter = false;
         }
 
-        builder.Append(" )");
-        return (builder.ToString(), parameters);
+        if (parameters.Count == 0)
+        {
+            return (string.Empty, Array.Empty<Tuple<string, object>>());
+        }
+
+        return ($"WHERE ({queryBuilder})", parameters);
     }
+
 
     public async Task DeleteAsync(string index, MemoryRecord record, CancellationToken cancellationToken = default)
     {
         try
         {
+            // Use the encoded ID for deletion as stored in Cosmos DB
+            var encodedId = AzureCosmosDbMemoryRecord.EncodeId(record.Id);
             await this._cosmosClient
                 .GetDatabase(DatabaseName)
                 .GetContainer(index)
-                .DeleteItemAsync<MemoryRecord>(record.Id,
-                    new PartitionKey(record.Id),
+                .DeleteItemAsync<AzureCosmosDbMemoryRecord>(encodedId, // Use encoded ID
+                    new PartitionKey(record.GetFileId()), // Use original File ID for partition key
                     cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
-            this._logger.LogTrace("Index {0} record {1} not found, nothing to delete", index, record.Id);
+            this._logger.LogTrace("Index {Index} record {Id} (encoded: {EncodedId}) not found, nothing to delete", index, record.Id, AzureCosmosDbMemoryRecord.EncodeId(record.Id));
         }
     }
 }

@@ -94,7 +94,7 @@ internal class AzureCosmosDbMemoryRecord
         return memoryRecord;
     }
 
-    private static string EncodeId(string recordId)
+    internal static string EncodeId(string recordId) // Changed from private to internal static
     {
         var bytes = Encoding.UTF8.GetBytes(recordId);
         return Convert.ToBase64String(bytes).Replace('=', '_');
