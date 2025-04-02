@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <RollForward>LatestMajor</RollForward>
+        <AssemblyName>Microsoft.KernelMemory.MemoryDb.AzureCosmosDbTabular</AssemblyName>
+        <RootNamespace>Microsoft.KernelMemory.MemoryDb.AzureCosmosDbTabular</RootNamespace>
+        <NoWarn>$(NoWarn);CS1700;KMEXP00;KMEXP03;CA1724;CA1308;</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\..\service\Abstractions\Abstractions.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="System.Linq.Async" />
+        <PackageReference Include="Microsoft.Azure.Cosmos" />
+        <PackageReference Include="ClosedXML" />
+    </ItemGroup>
+
+    <PropertyGroup>
+        <IsPackable>true</IsPackable>
+        <PackageId>Microsoft.KernelMemory.MemoryDb.AzureCosmosDbTabular</PackageId>
+        <Product>Azure Cosmos DB Tabular Data connector for Kernel Memory</Product>
+        <Description>Azure Cosmos DB connector for Microsoft Kernel Memory, specialized for storing and querying tabular data (Excel, CSV, JSON) with structured query capabilities.</Description>
+        <PackageTags>Memory, RAG, Kernel Memory, Azure Cosmos DB, NoSQL, AI, Artificial Intelligence, Tabular Data, Excel, CSV, JSON, Structured Query</PackageTags>
+        <DocumentationFile>bin/$(Configuration)/$(TargetFramework)/$(AssemblyName).xml</DocumentationFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="README.md" Link="README.md" Pack="true" PackagePath="." Visible="false" />
+    </ItemGroup>
+
+</Project>
