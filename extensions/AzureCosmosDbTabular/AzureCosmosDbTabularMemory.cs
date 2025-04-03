@@ -375,116 +375,78 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
     /// <returns>A tuple containing the WHERE clause and the parameters.</returns>
     private (string, IReadOnlyCollection<Tuple<string, object>>) ProcessFilters(string alias, ICollection<MemoryFilter>? filters = null)
     {
-        if (filters is null || filters.Count == 0)
+        if (filters is null || !filters.Any(f => !f.IsEmpty()))
         {
             return (string.Empty, Array.Empty<Tuple<string, object>>());
         }
 
         var parameters = new List<Tuple<string, object>>();
-        var builder = new StringBuilder();
-        builder.Append("WHERE ( ");
+        var outerBuilder = new StringBuilder(); // For OR between filters
+        bool firstOuterFilter = true;
 
-        // Track if we've added any conditions yet
-        bool hasConditions = false;
-
-        // Process standard tag filters
-        for (var i = 0; i < filters.Count; i++)
+        foreach (var filter in filters)
         {
-            var filter = filters.ElementAt(i);
-
-            // Skip empty filters
-            if (filter.IsEmpty())
-            {
-                continue;
-            }
-
-            // Build conditions for a single filter (AND logic within the filter)
-            var singleFilterBuilder = new StringBuilder();
-            bool hasTagConditions = false;
-            for (var j = 0; j < filter.Pairs.Count(); j++)
-            {
-                var pair = filter.Pairs.ElementAt(j);
-                if (pair.Value is null) { continue; } // Skip null values
-
-                // Check if this is a structured data filter (special tag format)
-                if (pair.Key.StartsWith("data.", StringComparison.Ordinal))
-                {
-                    // This will be handled in the next section
-                    continue;
-                }
-
-                if (hasTagConditions)
-                {
-                    singleFilterBuilder.Append(" AND ");
-                }
-
-                string paramName = $"@filter_{parameters.Count}";
-                singleFilterBuilder.Append($"ARRAY_CONTAINS({alias}.{AzureCosmosDbTabularMemoryRecord.TagsField}.{pair.Key}, {paramName})");
-                parameters.Add(Tuple.Create<string, object>(paramName, pair.Value));
-                hasTagConditions = true;
-            }
-
-            // Append the conditions for this filter if any tags were found
-            if (hasTagConditions)
-            {
-                if (hasConditions) { builder.Append(" OR "); } // OR logic between different filters
-                builder.Append('(').Append(singleFilterBuilder).Append(')');
-                hasConditions = true;
-            }
-        }
-
-        // Process structured data filters (from special tags with "data." prefix)
-        for (var i = 0; i < filters.Count; i++)
-        {
-            var filter = filters.ElementAt(i);
             if (filter.IsEmpty()) { continue; }
 
-            // Build conditions for a single filter (AND logic within the filter)
-            var singleDataFilterBuilder = new StringBuilder();
-            bool hasDataConditions = false;
-            for (var j = 0; j < filter.Pairs.Count(); j++)
+            var innerBuilder = new StringBuilder(); // For AND within a filter
+            bool firstInnerCondition = true;
+
+            foreach (var pair in filter)
             {
-                var pair = filter.Pairs.ElementAt(j);
                 if (pair.Value is null) { continue; } // Skip null values
 
-                // Only process structured data filters
-                if (!pair.Key.StartsWith("data.", StringComparison.Ordinal))
+                if (!firstInnerCondition)
                 {
-                    continue;
+                    innerBuilder.Append(" AND ");
                 }
 
-                // Extract the field name (remove "data." prefix)
-                string fieldName = pair.Key.Substring(5);
-                if (string.IsNullOrEmpty(fieldName)) { continue; } // Skip if key is just "data."
-
-                if (hasDataConditions)
-                {
-                    singleDataFilterBuilder.Append(" AND ");
-                }
-
-                // Add the condition for the data field
-                string paramName = $"@data_{parameters.Count}";
-                singleDataFilterBuilder.Append($"{alias}.{AzureCosmosDbTabularMemoryRecord.DataField}[\"{fieldName}\"] = {paramName}");
+                // Use a consistent parameter naming scheme
+                string paramName = $"@p_{parameters.Count}";
                 parameters.Add(Tuple.Create<string, object>(paramName, pair.Value));
-                hasDataConditions = true;
+
+                if (pair.Key.StartsWith("data.", StringComparison.Ordinal))
+                {
+                    // Handle structured data filter
+                    string fieldName = pair.Key.Substring(5);
+                    if (!string.IsNullOrEmpty(fieldName))
+                    {
+                        // Use bracket notation for field names that might contain special characters
+                        innerBuilder.Append($"{alias}.{AzureCosmosDbTabularMemoryRecord.DataField}[\"{fieldName}\"] = {paramName}");
+                        firstInnerCondition = false;
+                    }
+                    else
+                    {
+                        this._logger.LogWarning("Invalid structured data filter key found: {Key}", pair.Key);
+                        // Remove the parameter added for the invalid key
+                        parameters.RemoveAt(parameters.Count - 1);
+                    }
+                }
+                else // Handle standard tag filter
+                {
+                    // Use bracket notation for tag keys that might contain special characters
+                    innerBuilder.Append($"ARRAY_CONTAINS({alias}.{AzureCosmosDbTabularMemoryRecord.TagsField}[\"{pair.Key}\"], {paramName})");
+                    firstInnerCondition = false;
+                }
             }
 
-            // Append the conditions for this filter if any data fields were found
-            if (hasDataConditions)
+            // Only add this filter's conditions if it generated any valid conditions
+            if (!firstInnerCondition) // means innerBuilder is not empty
             {
-                if (hasConditions) { builder.Append(" OR "); } // OR logic between different filters
-                builder.Append('(').Append(singleDataFilterBuilder).Append(')');
-                hasConditions = true;
+                if (!firstOuterFilter)
+                {
+                    outerBuilder.Append(" OR ");
+                }
+                outerBuilder.Append('(').Append(innerBuilder).Append(')');
+                firstOuterFilter = false;
             }
         }
 
-        // If we didn't add any conditions, return an empty string
-        if (!hasConditions)
+        if (firstOuterFilter) // means outerBuilder is empty (no valid filters found)
         {
             return (string.Empty, Array.Empty<Tuple<string, object>>());
         }
 
-        builder.Append(" )");
-        return (builder.ToString(), parameters);
+        // Return the complete WHERE clause
+        return ($"WHERE {outerBuilder}", parameters);
     }
 }
