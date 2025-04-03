@@ -178,19 +178,54 @@ internal class AzureCosmosDbTabularMemoryRecord
         {
             try
             {
-                var deserializedData = JsonSerializer.Deserialize<Dictionary<string, object>>(
-                    tabularDataStr,
-                    AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
+                // Use JsonDocument for more precise control over deserialization
+                using var jsonDoc = JsonDocument.Parse(tabularDataStr);
+                var root = jsonDoc.RootElement;
 
-                if (deserializedData != null)
+                if (root.ValueKind == JsonValueKind.Object)
                 {
-                    extractedData = deserializedData;
+                    foreach (var property in root.EnumerateObject())
+                    {
+                        string key = property.Name;
+                        object value;
+
+                        // Convert JsonElement to appropriate .NET type
+                        switch (property.Value.ValueKind)
+                        {
+                            case JsonValueKind.String:
+                                value = property.Value.GetString() ?? string.Empty;
+                                break;
+                            case JsonValueKind.Number:
+                                if (property.Value.TryGetInt32(out int intValue))
+                                    value = intValue;
+                                else if (property.Value.TryGetInt64(out long longValue))
+                                    value = longValue;
+                                else if (property.Value.TryGetDouble(out double doubleValue))
+                                    value = doubleValue;
+                                else
+                                    value = property.Value.GetRawText();
+                                break;
+                            case JsonValueKind.True:
+                                value = true;
+                                break;
+                            case JsonValueKind.False:
+                                value = false;
+                                break;
+                            case JsonValueKind.Null:
+                                value = null;
+                                break;
+                            default:
+                                value = property.Value.GetRawText();
+                                break;
+                        }
+
+                        extractedData[key] = value;
+                    }
                 }
             }
             catch (JsonException ex)
             {
-                // Consider logging the error
-                Console.WriteLine($"WARN: Failed to deserialize tabular_data from payload for record {record.Id}: {ex.Message}");
+                Console.WriteLine($"WARN: Failed to parse tabular_data from payload for record {record.Id}: {ex.Message}");
             }
         }
 
@@ -199,19 +234,26 @@ internal class AzureCosmosDbTabularMemoryRecord
         {
             try
             {
-                var deserializedSource = JsonSerializer.Deserialize<Dictionary<string, string>>(
-                    sourceInfoStr,
-                    AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
+                // Use JsonDocument for more precise control over deserialization
+                using var jsonDoc = JsonDocument.Parse(sourceInfoStr);
+                var root = jsonDoc.RootElement;
 
-                if (deserializedSource != null)
+                if (root.ValueKind == JsonValueKind.Object)
                 {
-                    extractedSource = deserializedSource;
+                    foreach (var property in root.EnumerateObject())
+                    {
+                        string key = property.Name;
+                        string value = property.Value.ValueKind == JsonValueKind.String
+                            ? property.Value.GetString() ?? string.Empty
+                            : property.Value.ToString();
+
+                        extractedSource[key] = value;
+                    }
                 }
             }
             catch (JsonException ex)
             {
-                // Consider logging the error
-                Console.WriteLine($"WARN: Failed to deserialize source_info from payload for record {record.Id}: {ex.Message}");
+                Console.WriteLine($"WARN: Failed to parse source_info from payload for record {record.Id}: {ex.Message}");
             }
         }
 
