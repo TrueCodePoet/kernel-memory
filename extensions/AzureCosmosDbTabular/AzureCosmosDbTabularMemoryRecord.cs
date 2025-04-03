@@ -169,79 +169,68 @@ internal class AzureCosmosDbTabularMemoryRecord
         var id = EncodeId(record.Id);
         var fileId = record.GetFileId();
 
+        // Initialize with empty data/source dictionaries
+        Dictionary<string, object> extractedData = new();
+        Dictionary<string, string> extractedSource = new();
+
+        // First, try to extract data from payload (primary method)
+        if (record.Payload.TryGetValue("tabular_data", out var tabularData) && tabularData is string tabularDataStr)
+        {
+            try
+            {
+                var deserializedData = JsonSerializer.Deserialize<Dictionary<string, object>>(
+                    tabularDataStr,
+                    AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
+
+                if (deserializedData != null)
+                {
+                    extractedData = deserializedData;
+                }
+            }
+            catch (JsonException ex)
+            {
+                // Consider logging the error
+                Console.WriteLine($"WARN: Failed to deserialize tabular_data from payload for record {record.Id}: {ex.Message}");
+            }
+        }
+
+        // Then, try to extract source info from payload (primary method)
+        if (record.Payload.TryGetValue("source_info", out var sourceInfo) && sourceInfo is string sourceInfoStr)
+        {
+            try
+            {
+                var deserializedSource = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                    sourceInfoStr,
+                    AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
+
+                if (deserializedSource != null)
+                {
+                    extractedSource = deserializedSource;
+                }
+            }
+            catch (JsonException ex)
+            {
+                // Consider logging the error
+                Console.WriteLine($"WARN: Failed to deserialize source_info from payload for record {record.Id}: {ex.Message}");
+            }
+        }
+
+        // Use provided data/source parameters as fallback if available
+        var finalData = data ?? extractedData;
+        var finalSource = source ?? extractedSource;
+
+        // Create a single record instance with all the data
         var memoryRecord = new AzureCosmosDbTabularMemoryRecord
         {
             Id = id,
             File = fileId,
             Payload = record.Payload,
             Tags = record.Tags,
-            // Assign the float array directly
+            // Vector assignment remains unchanged
             Vector = record.Vector.Data.ToArray(),
-            Data = data ?? new Dictionary<string, object>(),
-            Source = source ?? new Dictionary<string, string>()
+            Data = finalData,
+            Source = finalSource
         };
-
-        // Extract tabular data from payload if provided
-        if (data == null && record.Payload.TryGetValue("tabular_data", out var tabularData) && tabularData is string tabularDataStr)
-        {
-            try
-            {
-                var extractedData = JsonSerializer.Deserialize<Dictionary<string, object>>(
-                    tabularDataStr,
-                    AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
-
-                if (extractedData != null)
-                {
-                    // Create a new record with the extracted data
-                    memoryRecord = new AzureCosmosDbTabularMemoryRecord
-                    {
-                        Id = id,
-                        File = fileId,
-                        Payload = record.Payload,
-                        Tags = record.Tags,
-                        // Assign the float array directly
-                        Vector = record.Vector.Data.ToArray(),
-                        Data = extractedData,
-                        Source = memoryRecord.Source
-                    };
-                }
-            }
-            catch (JsonException ex)
-            {
-                // Log or handle the exception as needed
-            }
-        }
-
-        // Extract source information from payload if provided
-        if (source == null && record.Payload.TryGetValue("source_info", out var sourceInfo) && sourceInfo is string sourceInfoStr)
-        {
-            try
-            {
-                var extractedSource = JsonSerializer.Deserialize<Dictionary<string, string>>(
-                    sourceInfoStr,
-                    AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
-
-                if (extractedSource != null)
-                {
-                    // Create a new record with the extracted source
-                    memoryRecord = new AzureCosmosDbTabularMemoryRecord
-                    {
-                        Id = id,
-                        File = fileId,
-                        Payload = record.Payload,
-                        Tags = record.Tags,
-                        // Assign the float array directly
-                        Vector = record.Vector.Data.ToArray(),
-                        Data = memoryRecord.Data,
-                        Source = extractedSource
-                    };
-                }
-            }
-            catch (JsonException ex)
-            {
-                // Log or handle the exception as needed
-            }
-        }
 
         return memoryRecord;
     }

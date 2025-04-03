@@ -165,43 +165,11 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
     /// <inheritdoc/>
     public async Task<string> UpsertAsync(string index, MemoryRecord record, CancellationToken cancellationToken = default)
     {
-        // Extract tabular data from the record if available
-        Dictionary<string, object>? data = null;
-        Dictionary<string, string>? source = null;
+        // Create the Cosmos DB record directly from the memory record
+        // The FromMemoryRecord method now handles extracting tabular_data and source_info from the payload
+        var memoryRecord = AzureCosmosDbTabularMemoryRecord.FromMemoryRecord(record);
 
-        // Check if the record contains tabular data in its payload
-        if (record.Payload.TryGetValue("tabular_data", out var tabularData) && tabularData is string tabularDataStr)
-        {
-            try
-            {
-                data = JsonSerializer.Deserialize<Dictionary<string, object>>(
-                    tabularDataStr,
-                    AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
-            }
-            catch (JsonException ex)
-            {
-                this._logger.LogWarning("Failed to deserialize tabular data: {Message}", ex.Message);
-            }
-        }
-
-        // Check if the record contains source information in its payload
-        if (record.Payload.TryGetValue("source_info", out var sourceInfo) && sourceInfo is string sourceInfoStr)
-        {
-            try
-            {
-                source = JsonSerializer.Deserialize<Dictionary<string, string>>(
-                    sourceInfoStr,
-                    AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
-            }
-            catch (JsonException ex)
-            {
-                this._logger.LogWarning("Failed to deserialize source information: {Message}", ex.Message);
-            }
-        }
-
-        var memoryRecord = AzureCosmosDbTabularMemoryRecord.FromMemoryRecord(record, data, source);
-
-        // Log the structure before upserting for debugging path issues
+        // Optional debugging: Log the structure before upserting
         // try {
         //     string json = System.Text.Json.JsonSerializer.Serialize(memoryRecord);
         //     this._logger.LogTrace("Upserting document structure: {Json}", json);
