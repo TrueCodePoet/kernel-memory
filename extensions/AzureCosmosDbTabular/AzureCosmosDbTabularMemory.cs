@@ -66,8 +66,8 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         var containerProperties = AzureCosmosDbTabularConfig.GetContainerProperties(index);
 
         // Define and add the vector index policy dynamically
-        string vectorFieldPath = $"/{AzureCosmosDbTabularMemoryRecord.VectorField}"; // "/embedding"
-        string vectorDataPath = $"{vectorFieldPath}/Data"; // Assumed path: "/embedding/Data"
+        string vectorFieldPath = $"/{AzureCosmosDbTabularMemoryRecord.VectorField}"; // Reverted path: "/embedding"
+        // string vectorDataPath = $"{vectorFieldPath}/Data"; // Removed incorrect path assumption
 
         // Remove any default exclusion for the vector path or its children
         var exclusionToRemove = containerProperties.IndexingPolicy.ExcludedPaths.FirstOrDefault(p => p.Path == vectorFieldPath + "/*");
@@ -76,12 +76,12 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
             containerProperties.IndexingPolicy.ExcludedPaths.Remove(exclusionToRemove);
         }
 
-        // Ensure the specific vector data path is included if using wildcard includes
-        if (!containerProperties.IndexingPolicy.IncludedPaths.Any(p => p.Path == vectorDataPath + "/?"))
+        // Ensure the specific vector path is included if using wildcard includes
+        if (!containerProperties.IndexingPolicy.IncludedPaths.Any(p => p.Path == vectorFieldPath + "/?"))
         {
             if (!containerProperties.IndexingPolicy.IncludedPaths.Any(p => p.Path == "/*"))
             {
-                containerProperties.IndexingPolicy.IncludedPaths.Add(new IncludedPath { Path = vectorDataPath + "/?" });
+                containerProperties.IndexingPolicy.IncludedPaths.Add(new IncludedPath { Path = vectorFieldPath + "/?" });
             }
         }
 
@@ -89,7 +89,7 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         containerProperties.IndexingPolicy.VectorIndexes.Clear(); // Clear potentially incorrect definitions
         containerProperties.IndexingPolicy.VectorIndexes.Add(new VectorIndexPath
         {
-            Path = vectorDataPath, // Corrected Path: Targeting nested Data property
+            Path = vectorFieldPath, // Reverted Path: Targeting root embedding property
             Type = VectorIndexType.Flat // Using Flat index type.
         });
 
@@ -98,7 +98,7 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         this._logger.LogInformation("Created/Ensured container {Index} in database {Database} with Vector Index Path {VectorPath}",
-            index, this._databaseName, vectorDataPath);
+            index, this._databaseName, vectorFieldPath); // Log the correct path used
     }
 
     /// <inheritdoc/>
@@ -223,14 +223,14 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         // Process filters to extract both standard tag filters and structured data filters
         var (whereCondition, filterParameters) = this.ProcessFilters("c", filters);
 
-        // Construct the vector search query using the corrected path
-        string vectorDataPath = $"c.{AzureCosmosDbTabularMemoryRecord.VectorField}.Data"; // Corrected path c.embedding.Data
+        // Construct the vector search query using the root path
+        string vectorFieldQueryPath = $"c.{AzureCosmosDbTabularMemoryRecord.VectorField}"; // Reverted path c.embedding
         var sql = $"""
                    SELECT TOP @limit
-                     {AzureCosmosDbTabularMemoryRecord.Columns("c", withEmbeddings)}, VectorDistance({vectorDataPath}, @queryEmbedding) AS SimilarityScore
+                     {AzureCosmosDbTabularMemoryRecord.Columns("c", withEmbeddings)}, VectorDistance({vectorFieldQueryPath}, @queryEmbedding) AS SimilarityScore
                    FROM c
                    {whereCondition}
-                   ORDER BY VectorDistance({vectorDataPath}, @queryEmbedding) ASC
+                   ORDER BY VectorDistance({vectorFieldQueryPath}, @queryEmbedding) ASC
                    """; // ASC order because lower distance means higher similarity
 
         var queryDefinition = new QueryDefinition(sql)
@@ -261,7 +261,7 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
             catch (CosmosException ex) when (ex.Message.Contains("VectorDistance"))
             {
                 // Provide a more specific error if VectorDistance fails (e.g., index not configured correctly)
-                this._logger.LogError(ex, "Vector search failed. Ensure the vector index path '/{VectorField}/Data' is correctly configured on container '{Index}'.", AzureCosmosDbTabularMemoryRecord.VectorField, index);
+                this._logger.LogError(ex, "Vector search failed. Ensure the vector index path '/{VectorField}' is correctly configured on container '{Index}'.", AzureCosmosDbTabularMemoryRecord.VectorField, index); // Updated log message path
                 // Re-throw or handle as appropriate, here we break the loop
                 yield break;
             }

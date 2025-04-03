@@ -248,8 +248,8 @@ var results = await memory.SearchAsync(filter: filter);
 The extension creates a database (default name "memory", configurable via `DatabaseName`) in your Azure Cosmos DB account. Each memory index is stored as a separate container within this database.
 
 **Vector Search Implementation:** This connector utilizes Azure Cosmos DB's native vector search capabilities.
-- When an index is created (`CreateIndexAsync`), a vector index policy (Flat index, Cosine distance) is automatically configured on the `embedding` field.
-- Similarity searches (`GetSimilarListAsync`) use the `VectorDistance` function in Cosmos DB queries to perform efficient vector comparisons.
+- When an index is created (`CreateIndexAsync`), a vector index policy (Flat index, Cosine distance) is automatically configured on the `/embedding` path, assuming the standard serialization of Kernel Memory's `Embedding` type.
+- Similarity searches (`GetSimilarListAsync`) use the `VectorDistance` function in Cosmos DB queries comparing against the `c.embedding` field to perform efficient vector comparisons.
 
 Memory records are stored with the following structure:
 - `id`: The original `MemoryRecord.Id`, Base64 encoded for compatibility with Cosmos DB ID constraints.
