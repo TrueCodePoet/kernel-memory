@@ -173,87 +173,85 @@ internal class AzureCosmosDbTabularMemoryRecord
         Dictionary<string, object> extractedData = new();
         Dictionary<string, string> extractedSource = new();
 
-        // First, try to extract data from payload (primary method)
-        if (record.Payload.TryGetValue("tabular_data", out var tabularData) && tabularData is string tabularDataStr)
+        // NEW APPROACH: Extract structured data directly from the "text" field in the payload
+        if (record.Payload.TryGetValue("text", out var textObj) && textObj is string text && !string.IsNullOrEmpty(text))
         {
             try
             {
-                // Use JsonDocument for more precise control over deserialization
-                using var jsonDoc = JsonDocument.Parse(tabularDataStr);
-                var root = jsonDoc.RootElement;
+                // Parse the text to extract worksheet, row number, and column values
+                string[] lines = text.Split('\n');
+                string currentWorksheet = string.Empty;
+                int currentRowNumber = 0;
 
-                if (root.ValueKind == JsonValueKind.Object)
+                foreach (string line in lines)
                 {
-                    foreach (var property in root.EnumerateObject())
+                    // Look for worksheet and row number indicators
+                    if (line.StartsWith("Worksheet: "))
                     {
-                        string key = property.Name;
-                        object value;
-
-                        // Convert JsonElement to appropriate .NET type
-                        switch (property.Value.ValueKind)
+                        // Format: "Worksheet: SheetName, Row: 123"
+                        string[] parts = line.Split(',');
+                        if (parts.Length >= 2)
                         {
-                            case JsonValueKind.String:
-                                value = property.Value.GetString() ?? string.Empty;
-                                break;
-                            case JsonValueKind.Number:
-                                if (property.Value.TryGetInt32(out int intValue))
-                                    value = intValue;
-                                else if (property.Value.TryGetInt64(out long longValue))
-                                    value = longValue;
-                                else if (property.Value.TryGetDouble(out double doubleValue))
-                                    value = doubleValue;
-                                else
-                                    value = property.Value.GetRawText();
-                                break;
-                            case JsonValueKind.True:
-                                value = true;
-                                break;
-                            case JsonValueKind.False:
-                                value = false;
-                                break;
-                            case JsonValueKind.Null:
-                                value = null;
-                                break;
-                            default:
-                                value = property.Value.GetRawText();
-                                break;
+                            currentWorksheet = parts[0].Substring("Worksheet: ".Length).Trim();
+
+                            string rowPart = parts[1].Trim();
+                            if (rowPart.StartsWith("Row: ") && int.TryParse(rowPart.Substring("Row: ".Length), out int rowNum))
+                            {
+                                currentRowNumber = rowNum;
+                            }
                         }
 
-                        extractedData[key] = value;
+                        // Add to source info
+                        extractedSource["_worksheet"] = currentWorksheet;
+                        extractedSource["_rowNumber"] = currentRowNumber.ToString();
+                        continue;
                     }
-                }
-            }
-            catch (JsonException ex)
-            {
-                Console.WriteLine($"WARN: Failed to parse tabular_data from payload for record {record.Id}: {ex.Message}");
-            }
-        }
 
-        // Then, try to extract source info from payload (primary method)
-        if (record.Payload.TryGetValue("source_info", out var sourceInfo) && sourceInfo is string sourceInfoStr)
-        {
-            try
-            {
-                // Use JsonDocument for more precise control over deserialization
-                using var jsonDoc = JsonDocument.Parse(sourceInfoStr);
-                var root = jsonDoc.RootElement;
-
-                if (root.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var property in root.EnumerateObject())
+                    // Look for column name and value pairs
+                    int colonIndex = line.IndexOf(':');
+                    if (colonIndex > 0)
                     {
-                        string key = property.Name;
-                        string value = property.Value.ValueKind == JsonValueKind.String
-                            ? property.Value.GetString() ?? string.Empty
-                            : property.Value.ToString();
+                        string columnName = line.Substring(0, colonIndex).Trim();
+                        string valueStr = line.Substring(colonIndex + 1).Trim();
 
-                        extractedSource[key] = value;
+                        // Skip metadata fields that start with underscore
+                        if (columnName.StartsWith("_"))
+                        {
+                            continue;
+                        }
+
+                        // Try to convert value to appropriate type
+                        object value;
+
+                        if (valueStr == "NULL")
+                        {
+                            value = null;
+                        }
+                        else if (bool.TryParse(valueStr, out bool boolValue))
+                        {
+                            value = boolValue;
+                        }
+                        else if (int.TryParse(valueStr, out int intValue))
+                        {
+                            value = intValue;
+                        }
+                        else if (double.TryParse(valueStr, out double doubleValue))
+                        {
+                            value = doubleValue;
+                        }
+                        else
+                        {
+                            value = valueStr;
+                        }
+
+                        // Add to structured data
+                        extractedData[columnName] = value;
                     }
                 }
             }
-            catch (JsonException ex)
+            catch (Exception ex)
             {
-                Console.WriteLine($"WARN: Failed to parse source_info from payload for record {record.Id}: {ex.Message}");
+                Console.WriteLine($"WARN: Failed to parse text field for record {record.Id}: {ex.Message}");
             }
         }
 
