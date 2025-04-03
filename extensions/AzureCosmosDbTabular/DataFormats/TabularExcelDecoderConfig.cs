@@ -54,8 +54,10 @@ public class TabularExcelDecoderConfig
 
     /// <summary>
     /// Gets or sets the time format to use when converting times to strings.
+    /// Use standard TimeSpan format specifiers (e.g., "c", "g", "G") or custom formats (e.g., @"hh\:mm\:ss").
+    /// See: https://learn.microsoft.com/en-us/dotnet/standard/base-types/standard-timespan-format-strings
     /// </summary>
-    public string TimeFormat { get; set; } = "HH:mm:ss";
+    public string TimeFormat { get; set; } = "c"; // Use constant format specifier "c" as a robust default
 
     /// <summary>
     /// Gets or sets the format provider to use when formatting times.
