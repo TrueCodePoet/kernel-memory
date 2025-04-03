@@ -212,7 +212,7 @@ public sealed class TabularExcelDecoder : IContentDecoder
                     {
                         ["worksheetName"] = worksheetName,
                         ["rowNumber"] = rowNumber.ToString(),
-                        ["tabularData"] = JsonSerializer.Serialize(rowData)
+                        ["tabular_data"] = JsonSerializer.Serialize(rowData) // Use snake_case key to match UpsertAsync expectation
                     };
 
                     // Create a text representation for the chunk content
