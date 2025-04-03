@@ -103,7 +103,7 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
         containerProperties.IndexingPolicy.VectorIndexes.Add(new VectorIndexPath
         {
             Path = vectorFieldPath, // Reverted Path: Targeting root embedding property
-            Type = VectorIndexType.Flat // Using Flat index type.
+            Type = VectorIndexType.QuantizedFlat // Switched to QuantizedFlat to support higher dimensions (e.g., 1536)
         });
 
         var containerResponse = await databaseResponse.Database.CreateContainerIfNotExistsAsync(
