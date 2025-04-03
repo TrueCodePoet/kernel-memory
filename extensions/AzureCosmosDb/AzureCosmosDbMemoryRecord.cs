@@ -10,7 +10,8 @@ using Microsoft.KernelMemory.MemoryStorage;
 // using System.Linq; // Removed unnecessary using directive
 // using Newtonsoft.Json; // Removed unnecessary using directive
 
-using Embedding = Microsoft.KernelMemory.Embedding;
+// No longer using the alias as we change the property type
+// using Embedding = Microsoft.KernelMemory.Embedding; 
 
 namespace Microsoft.KernelMemory.MemoryDb.AzureCosmosDb;
 
@@ -36,8 +37,9 @@ internal class AzureCosmosDbMemoryRecord
     public TagCollection Tags { get; init; } = [];
 
     [JsonPropertyName(VectorField)]
-    [JsonConverter(typeof(Embedding.JsonConverter))]
-    public Embedding Vector { get; init; }
+    // Remove JsonConverter attribute and change type to float[]
+    // [JsonConverter(typeof(Embedding.JsonConverter))] 
+    public float[] Vector { get; init; } = Array.Empty<float>();
 
     internal PartitionKey GetPartitionKey() => new(this.File);
 
@@ -69,9 +71,10 @@ internal class AzureCosmosDbMemoryRecord
             Tags = this.Tags
         };
 
-        if (withEmbedding)
+        if (withEmbedding && this.Vector.Length > 0) // Use Length for array
         {
-            memoryRecord.Vector = this.Vector;
+            // Reconstruct Embedding object from the float array
+            memoryRecord.Vector = new Embedding(this.Vector);
         }
 
         return memoryRecord;
@@ -88,7 +91,8 @@ internal class AzureCosmosDbMemoryRecord
             File = fileId,
             Payload = record.Payload,
             Tags = record.Tags,
-            Vector = record.Vector
+            // Assign the float array directly
+            Vector = record.Vector.Data.ToArray()
         };
 
         return memoryRecord;

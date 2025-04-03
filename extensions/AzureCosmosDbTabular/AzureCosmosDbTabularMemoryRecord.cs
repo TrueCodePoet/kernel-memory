@@ -10,7 +10,8 @@ using Microsoft.Azure.Cosmos;
 using Microsoft.KernelMemory;
 using Microsoft.KernelMemory.MemoryStorage;
 
-using Embedding = Microsoft.KernelMemory.Embedding;
+// No longer using the alias as we change the property type
+// using Embedding = Microsoft.KernelMemory.Embedding; 
 
 namespace Microsoft.KernelMemory.MemoryDb.AzureCosmosDbTabular;
 
@@ -71,8 +72,9 @@ internal class AzureCosmosDbTabularMemoryRecord
     /// Gets or sets the vector embedding.
     /// </summary>
     [JsonPropertyName(VectorField)]
-    [JsonConverter(typeof(Embedding.JsonConverter))]
-    public Embedding Vector { get; init; }
+    // Remove JsonConverter attribute and change type to float[]
+    // [JsonConverter(typeof(Embedding.JsonConverter))] 
+    public float[] Vector { get; init; } = Array.Empty<float>();
 
     /// <summary>
     /// Gets or sets the tabular data as key-value pairs.
@@ -143,9 +145,10 @@ internal class AzureCosmosDbTabularMemoryRecord
             memoryRecord.Payload["source_info"] = JsonSerializer.Serialize(Source, AzureCosmosDbTabularConfig.DefaultJsonSerializerOptions);
         }
 
-        if (withEmbedding)
+        if (withEmbedding && this.Vector.Length > 0) // Use Length for array
         {
-            memoryRecord.Vector = Vector;
+            // Reconstruct Embedding object from the float array
+            memoryRecord.Vector = new Embedding(this.Vector);
         }
 
         return memoryRecord;
@@ -172,7 +175,8 @@ internal class AzureCosmosDbTabularMemoryRecord
             File = fileId,
             Payload = record.Payload,
             Tags = record.Tags,
-            Vector = record.Vector,
+            // Assign the float array directly
+            Vector = record.Vector.Data.ToArray(),
             Data = data ?? new Dictionary<string, object>(),
             Source = source ?? new Dictionary<string, string>()
         };
@@ -195,7 +199,8 @@ internal class AzureCosmosDbTabularMemoryRecord
                         File = fileId,
                         Payload = record.Payload,
                         Tags = record.Tags,
-                        Vector = record.Vector,
+                        // Assign the float array directly
+                        Vector = record.Vector.Data.ToArray(),
                         Data = extractedData,
                         Source = memoryRecord.Source
                     };
@@ -225,7 +230,8 @@ internal class AzureCosmosDbTabularMemoryRecord
                         File = fileId,
                         Payload = record.Payload,
                         Tags = record.Tags,
-                        Vector = record.Vector,
+                        // Assign the float array directly
+                        Vector = record.Vector.Data.ToArray(),
                         Data = memoryRecord.Data,
                         Source = extractedSource
                     };
