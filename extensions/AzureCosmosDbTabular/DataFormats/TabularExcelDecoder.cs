@@ -72,23 +72,24 @@ public sealed class TabularExcelDecoder : IContentDecoder
             // Attempt to load the workbook
             workbook = new XLWorkbook(data);
         }
-        catch (Exception ex) when (ex.GetType().Name == "PartStructureException" || (ex.InnerException != null && ex.InnerException.GetType().Name == "PartStructureException"))
-        {
-            // Catch general Exception and check type name/message for PivotTable issues due to accessibility limitations
-            if (ex.Message.Contains("PivotTable", StringComparison.OrdinalIgnoreCase) || (ex.InnerException != null && ex.InnerException.Message.Contains("PivotTable", StringComparison.OrdinalIgnoreCase)))
-            {
-                this._log.LogWarning(ex, "Failed to load Excel file due to a PivotTable structure issue. Skipping this file.");
-                return Task.FromResult(result); // Return empty result
-            }
-            // Rethrow if it's not the specific PivotTable structure issue
-            this._log.LogError(ex, "Failed to load Excel file.");
-            throw;
-        }
         catch (Exception ex)
         {
-            // Log other potential loading errors and rethrow
-            this._log.LogError(ex, "Failed to load Excel file.");
-            throw;
+            // Check if the exception seems related to ClosedXML PivotTable reading based on stack trace or message
+            bool isPivotTableIssue = ex.StackTrace?.Contains("PivotTableCacheDefinitionPartReader", StringComparison.Ordinal) == true ||
+                                     ex.InnerException?.StackTrace?.Contains("PivotTableCacheDefinitionPartReader", StringComparison.Ordinal) == true ||
+                                     ex.Message.Contains("element structure in XML", StringComparison.OrdinalIgnoreCase); // Check specific message part
+
+            if (isPivotTableIssue)
+            {
+                this._log.LogWarning(ex, "Failed to load Excel file, likely due to a PivotTable structure issue. Skipping this file.");
+                return Task.FromResult(result); // Return empty result to skip gracefully
+            }
+            else
+            {
+                // Log other potential loading errors and rethrow
+                this._log.LogError(ex, "Failed to load Excel file.");
+                throw;
+            }
         }
 
         using (workbook) // Ensure disposal if workbook was loaded successfully
