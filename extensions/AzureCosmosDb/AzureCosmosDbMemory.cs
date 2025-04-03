@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel; // Added for Collection<Embedding>
 using System.Linq;
 using System.Net;
 using System.Runtime.CompilerServices;
@@ -48,8 +49,21 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
 
         var containerProperties = AzureCosmosDbConfig.GetContainerProperties(index);
 
-        // Define and add the vector index policy dynamically
-        string vectorFieldPath = $"/{AzureCosmosDbMemoryRecord.VectorField}"; // Reverted path: "/embedding"
+        // Define the vector field path
+        string vectorFieldPath = $"/{AzureCosmosDbMemoryRecord.VectorField}"; // "/embedding"
+
+        // Define the vector embedding policy for the container
+        var embeddings = new List<Microsoft.Azure.Cosmos.Embedding> // Specify the correct namespace
+        {
+            new()
+            {
+                Path = vectorFieldPath,
+                DataType = VectorDataType.Float32,
+                DistanceFunction = DistanceFunction.Cosine,
+                Dimensions = vectorSize,
+            }
+        };
+        containerProperties.VectorEmbeddingPolicy = new VectorEmbeddingPolicy(new Collection<Microsoft.Azure.Cosmos.Embedding>(embeddings)); // Specify the correct namespace
 
         // Remove any default exclusion for the vector path or its children
         // Iterate and remove the specific exclusion path if it exists
