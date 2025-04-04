@@ -216,15 +216,19 @@ public sealed class TabularExcelDecoder : IContentDecoder
                         ["tabular_data"] = JsonSerializer.Serialize(rowData) // Use snake_case key to match UpsertAsync expectation
                     };
 
-                    // Create a text representation for the chunk content
+                    // Create a more descriptive text representation for the chunk content
                     var sb = new StringBuilder();
-                    sb.AppendLine($"Worksheet: {worksheetName}, Row: {rowNumber}");
+                    sb.Append($"Record from worksheet {worksheetName}, row {rowNumber}:");
                     foreach (var kvp in rowData)
                     {
-                        sb.AppendLine($"{kvp.Key}: {kvp.Value}");
+                        // Skip internal metadata fields in the text representation
+                        if (kvp.Key.StartsWith("_")) continue;
+
+                        // Append as " Key is Value." - adjust phrasing as needed
+                        sb.Append($" {kvp.Key} is {kvp.Value?.ToString() ?? "NULL"}.");
                     }
 
-                    result.Sections.Add(new Chunk(sb.ToString(), chunkNumber, metadata));
+                    result.Sections.Add(new Chunk(sb.ToString().Trim(), chunkNumber, metadata)); // Trim potential trailing space
                 }
             }
         } // End using workbook
