@@ -260,30 +260,132 @@ Memory records are stored with the following structure:
 - `source`: Source information extracted from the `source_info` payload field (e.g., sheet name, row number).
 - `payload`: The original payload dictionary associated with the memory record (excluding `tabular_data` and `source_info` if they were processed).
 
-## Natural Language Query Translation
+## AI-Driven Filtering with TabularFilterHelper
 
-This extension focuses on the storage and retrieval of tabular data using structured filters. To translate natural language queries (e.g., "list all servers in Production") into structured filters, you would typically use an LLM in a preceding pipeline step.
+This extension now includes a `TabularFilterHelper` class that provides AI-driven filtering capabilities. This helper class can:
 
-For example:
+1. Discover available fields in the database
+2. Get the most common values for a field
+3. Generate filters based on field and value
+
+### Basic Usage
 
 ```csharp
-// 1. User asks a natural language question
-string userQuery = "List all servers in the Production environment";
+// Create the TabularFilterHelper
+var filterHelper = new TabularFilterHelper(memory);
 
-// 2. Use an LLM to translate the question into structured filters
-// (This would be implemented as a custom pipeline handler)
-var structuredFilter = await TranslateQueryToFilterAsync(userQuery);
-// Result: { "data.Environment": "Production" }
-
-// 3. Create a memory filter from the structured filter
-var filter = new MemoryFilter();
-foreach (var (key, value) in structuredFilter)
+// Get available fields
+var fields = await filterHelper.GetFilterableFieldsAsync("your-index");
+Console.WriteLine("Available fields:");
+foreach (var fieldType in fields.Keys)
 {
-    filter.Add(key, value);
+    Console.WriteLine($"  {fieldType}:");
+    foreach (var fieldName in fields[fieldType])
+    {
+        Console.WriteLine($"    - {fieldName}");
+    }
 }
 
-// 4. Execute the query using the structured filter
+// Get top values for a field
+var topValues = await filterHelper.GetTopFieldValuesAsync("your-index", "data", "environment");
+Console.WriteLine("Top values for environment:");
+foreach (var (value, count) in topValues)
+{
+    Console.WriteLine($"  - {value} ({count} occurrences)");
+}
+
+// Generate a filter
+var filter = filterHelper.GenerateFilter("data", "environment", "Production");
 var results = await memory.SearchAsync(filter: filter);
 ```
 
-The translation step is not included in this extension and would need to be implemented separately.
+### Integration with LLMs for Natural Language Queries
+
+The `TabularFilterHelper` class is designed to be used with LLMs to translate natural language queries into structured filters. Here's an example of how to integrate it with Semantic Kernel:
+
+```csharp
+// Create a kernel for LLM-based filtering
+var kernel = Kernel.CreateBuilder()
+    .AddAzureOpenAIChatCompletion(
+        "gpt-4",
+        "https://your-openai-service.openai.azure.com/",
+        "your-openai-api-key")
+    .Build();
+
+// Create a custom function to translate natural language to filters
+string promptTemplate = @"
+You are helping translate a user's question into a database filter.
+
+Available fields:
+{{$fields}}
+
+User question: {{$question}}
+
+Identify the most relevant field and value to filter on.
+Return your answer in JSON format with these properties:
+- fieldType: either 'tag' or 'data'
+- fieldName: the exact name of the field
+- value: the value to filter for
+
+JSON response:";
+
+// Get available fields
+var filterHelper = new TabularFilterHelper(memory);
+var fields = await filterHelper.GetFilterableFieldsAsync("your-index");
+
+// Build a description of available fields
+var fieldsList = new StringBuilder();
+foreach (var fieldType in fields.Keys)
+{
+    fieldsList.AppendLine($"  {fieldType}:");
+    foreach (var fieldName in fields[fieldType])
+    {
+        fieldsList.AppendLine($"    - {fieldName}");
+    }
+}
+
+// Create the function
+var translateFunction = kernel.CreateFunctionFromPrompt(promptTemplate);
+
+// Process a user query
+string userQuery = "Show me all production servers";
+var result = await kernel.InvokeAsync(translateFunction, new KernelArguments
+{
+    ["fields"] = fieldsList.ToString(),
+    ["question"] = userQuery
+});
+
+// Parse the JSON response
+var response = JsonSerializer.Deserialize<FilterResponse>(result.GetValue<string>());
+
+// Generate the filter
+var filter = filterHelper.GenerateFilter(response.FieldType, response.FieldName, response.Value);
+
+// Execute the query
+var searchResults = await memory.SearchAsync(filter: filter);
+
+// Helper class for JSON deserialization
+class FilterResponse
+{
+    public string FieldType { get; set; } = "data";
+    public string FieldName { get; set; } = "";
+    public string Value { get; set; } = "";
+}
+```
+
+## Implementation Details
+
+The extension creates a database (default name "memory", configurable via `DatabaseName`) in your Azure Cosmos DB account. Each memory index is stored as a separate container within this database.
+
+**Vector Search Implementation:** This connector utilizes Azure Cosmos DB's native vector search capabilities.
+- When an index is created (`CreateIndexAsync`), a vector index policy (Flat index, Cosine distance) is automatically configured on the `/embedding` path, assuming the standard serialization of Kernel Memory's `Embedding` type.
+- Similarity searches (`GetSimilarListAsync`) use the `VectorDistance` function in Cosmos DB queries comparing against the `c.embedding` field to perform efficient vector comparisons.
+
+Memory records are stored with the following structure:
+- `id`: The original `MemoryRecord.Id`, Base64 encoded for compatibility with Cosmos DB ID constraints.
+- `file`: The file identifier derived from `MemoryRecord.Id`, used as the **partition key** for the container.
+- `tags`: Collection of metadata tags.
+- `embedding`: Vector representation of the memory content, indexed for vector search.
+- `data`: Tabular data extracted from the `tabular_data` payload field, stored as key-value pairs.
+- `source`: Source information extracted from the `source_info` payload field (e.g., sheet name, row number).
+- `payload`: The original payload dictionary associated with the memory record (excluding `tabular_data` and `source_info` if they were processed).

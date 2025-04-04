@@ -374,13 +374,22 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
 
                 if (pair.Key.StartsWith("data.", StringComparison.Ordinal))
                 {
+                    // Normalize the field name (convert camelCase to snake_case)
+                    string normalizedKey = NormalizeFieldName(pair.Key);
+
                     // Handle structured data filter
-                    string fieldName = pair.Key.Substring(5);
+                    string fieldName = normalizedKey.Substring(5);
                     if (!string.IsNullOrEmpty(fieldName))
                     {
                         // Use bracket notation for field names that might contain special characters
                         innerBuilder.Append($"{alias}.{AzureCosmosDbTabularMemoryRecord.DataField}[\"{fieldName}\"] = {paramName}");
                         firstInnerCondition = false;
+
+                        // Log the normalization if it happened
+                        if (normalizedKey != pair.Key)
+                        {
+                            this._logger.LogDebug("Normalized field name: {OriginalKey} -> {NormalizedKey}", pair.Key, normalizedKey);
+                        }
                     }
                     else
                     {
@@ -416,5 +425,153 @@ internal sealed class AzureCosmosDbTabularMemory : IMemoryDb
 
         // Return the complete WHERE clause
         return ($"WHERE {outerBuilder}", parameters);
+    }
+
+    /// <summary>
+    /// Normalizes field names from camelCase to snake_case.
+    /// </summary>
+    /// <param name="fieldName">The field name to normalize.</param>
+    /// <returns>The normalized field name.</returns>
+    private string NormalizeFieldName(string fieldName)
+    {
+        if (!fieldName.StartsWith("data.")) return fieldName;
+
+        // Extract the part after "data."
+        string field = fieldName.Substring(5);
+
+        // Convert camelCase or PascalCase to snake_case
+        // e.g., "serverPurpose" → "server_purpose"
+        string snakeCase = System.Text.RegularExpressions.Regex.Replace(
+            field,
+            "(?<=[a-z])(?=[A-Z])",
+            "_"
+        ).ToLowerInvariant();
+
+        return "data." + snakeCase;
+    }
+
+    /// <summary>
+    /// Gets the filterable fields from the index.
+    /// </summary>
+    /// <param name="index">The index name.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A dictionary of field types and their available field names.</returns>
+    public async Task<Dictionary<string, HashSet<string>>> GetFilterableFieldsAsync(
+        string index,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["tags"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            ["data"] = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        };
+
+        // Query for a sample of documents to extract field names
+        var sql = "SELECT TOP 100 c.tags, c.data FROM c";
+        var queryDefinition = new QueryDefinition(sql);
+
+        try
+        {
+            using var feedIterator = this._cosmosClient
+                .GetDatabase(this._databaseName)
+                .GetContainer(index)
+                .GetItemQueryIterator<dynamic>(queryDefinition);
+
+            while (feedIterator.HasMoreResults)
+            {
+                var response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+
+                foreach (var item in response)
+                {
+                    // Extract tag keys
+                    if (item.tags != null)
+                    {
+                        foreach (var tagKey in ((IDictionary<string, object>)item.tags).Keys)
+                        {
+                            result["tags"].Add(tagKey);
+                        }
+                    }
+
+                    // Extract data field keys
+                    if (item.data != null)
+                    {
+                        foreach (var dataKey in ((IDictionary<string, object>)item.data).Keys)
+                        {
+                            result["data"].Add(dataKey);
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            this._logger.LogError(ex, "Error getting filterable fields from index {Index}", index);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Gets the top values for a specific field.
+    /// </summary>
+    /// <param name="index">The index name.</param>
+    /// <param name="fieldType">The field type (tag or data).</param>
+    /// <param name="fieldName">The field name.</param>
+    /// <param name="limit">The maximum number of values to return.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A list of field values and their occurrence counts.</returns>
+    public async Task<List<(string Value, int Count)>> GetTopFieldValuesAsync(
+        string index,
+        string fieldType,
+        string fieldName,
+        int limit = 10,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new List<(string Value, int Count)>();
+
+        // Determine the field path based on the field type
+        string fieldPath = fieldType.Equals("tag", StringComparison.OrdinalIgnoreCase)
+            ? $"c.{AzureCosmosDbTabularMemoryRecord.TagsField}[\"{fieldName}\"]"
+            : $"c.{AzureCosmosDbTabularMemoryRecord.DataField}[\"{fieldName}\"]";
+
+        // Query for the top values of the specified field
+        var sql = $@"
+            SELECT {fieldPath} as value, COUNT(1) as count
+            FROM c
+            WHERE IS_DEFINED({fieldPath})
+            GROUP BY {fieldPath}
+            ORDER BY count DESC
+            OFFSET 0 LIMIT {limit}
+        ";
+
+        var queryDefinition = new QueryDefinition(sql);
+
+        try
+        {
+            using var feedIterator = this._cosmosClient
+                .GetDatabase(this._databaseName)
+                .GetContainer(index)
+                .GetItemQueryIterator<dynamic>(queryDefinition);
+
+            while (feedIterator.HasMoreResults)
+            {
+                var response = await feedIterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+
+                foreach (var item in response)
+                {
+                    string value = item.value.ToString();
+                    int count = (int)item.count;
+
+                    result.Add((value, count));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            this._logger.LogError(ex, "Error getting top values for field {FieldType}.{FieldName} from index {Index}",
+                fieldType, fieldName, index);
+        }
+
+        return result;
     }
 }

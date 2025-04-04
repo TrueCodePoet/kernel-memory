@@ -173,80 +173,20 @@ internal class AzureCosmosDbTabularMemoryRecord
         Dictionary<string, object> extractedData = new();
         Dictionary<string, string> extractedSource = new();
 
-        // NEW APPROACH: Extract structured data directly from the "text" field in the payload
+        // Extract structured data from the text field in the payload
         if (record.Payload.TryGetValue("text", out var textObj) && textObj is string text && !string.IsNullOrEmpty(text))
         {
             try
             {
-                // Parse the text to extract worksheet, row number, and column values
-                string[] lines = text.Split('\n');
-                string currentWorksheet = string.Empty;
-                int currentRowNumber = 0;
-
-                foreach (string line in lines)
+                // Check if text is in the new sentence format
+                if (text.StartsWith("Record from worksheet"))
                 {
-                    // Look for worksheet and row number indicators
-                    if (line.StartsWith("Worksheet: "))
-                    {
-                        // Format: "Worksheet: SheetName, Row: 123"
-                        string[] parts = line.Split(',');
-                        if (parts.Length >= 2)
-                        {
-                            currentWorksheet = parts[0].Substring("Worksheet: ".Length).Trim();
-
-                            string rowPart = parts[1].Trim();
-                            if (rowPart.StartsWith("Row: ") && int.TryParse(rowPart.Substring("Row: ".Length), out int rowNum))
-                            {
-                                currentRowNumber = rowNum;
-                            }
-                        }
-
-                        // Add to source info
-                        extractedSource["_worksheet"] = currentWorksheet;
-                        extractedSource["_rowNumber"] = currentRowNumber.ToString();
-                        continue;
-                    }
-
-                    // Look for column name and value pairs
-                    int colonIndex = line.IndexOf(':');
-                    if (colonIndex > 0)
-                    {
-                        string columnName = line.Substring(0, colonIndex).Trim();
-                        string valueStr = line.Substring(colonIndex + 1).Trim();
-
-                        // Skip metadata fields that start with underscore
-                        if (columnName.StartsWith("_"))
-                        {
-                            continue;
-                        }
-
-                        // Try to convert value to appropriate type
-                        object value;
-
-                        if (valueStr == "NULL")
-                        {
-                            value = null;
-                        }
-                        else if (bool.TryParse(valueStr, out bool boolValue))
-                        {
-                            value = boolValue;
-                        }
-                        else if (int.TryParse(valueStr, out int intValue))
-                        {
-                            value = intValue;
-                        }
-                        else if (double.TryParse(valueStr, out double doubleValue))
-                        {
-                            value = doubleValue;
-                        }
-                        else
-                        {
-                            value = valueStr;
-                        }
-
-                        // Add to structured data
-                        extractedData[columnName] = value;
-                    }
+                    ParseSentenceFormat(text, extractedData, extractedSource);
+                }
+                // Check if text is in the old key-value format
+                else if (text.Contains("\n") && text.Contains(":"))
+                {
+                    ParseKeyValueFormat(text, extractedData, extractedSource);
                 }
             }
             catch (Exception ex)
@@ -285,5 +225,125 @@ internal class AzureCosmosDbTabularMemoryRecord
     {
         var bytes = Convert.FromBase64String(encodedId.Replace('_', '='));
         return Encoding.UTF8.GetString(bytes);
+    }
+
+    // Parse text in the new sentence format: "Record from worksheet Sheet1, row 123: Column1 is Value1. Column2 is Value2."
+    private static void ParseSentenceFormat(string text, Dictionary<string, object> data, Dictionary<string, string> source)
+    {
+        // Extract worksheet and row info
+        int worksheetStart = text.IndexOf("Record from worksheet ") + "Record from worksheet ".Length;
+        int rowStart = text.IndexOf(", row ");
+        if (rowStart > worksheetStart)
+        {
+            string worksheet = text.Substring(worksheetStart, rowStart - worksheetStart);
+
+            int rowEnd = text.IndexOf(":", rowStart);
+            if (rowEnd > rowStart)
+            {
+                string rowStr = text.Substring(rowStart + ", row ".Length, rowEnd - (rowStart + ", row ".Length));
+                if (int.TryParse(rowStr, out int rowNum))
+                {
+                    source["_worksheet"] = worksheet;
+                    source["_rowNumber"] = rowNum.ToString();
+
+                    // Now parse the column data
+                    string dataSection = text.Substring(rowEnd + 1).Trim();
+                    string[] pairs = dataSection.Split('.');
+
+                    foreach (string pair in pairs)
+                    {
+                        string trimmed = pair.Trim();
+                        if (string.IsNullOrEmpty(trimmed)) continue;
+
+                        int isIndex = trimmed.IndexOf(" is ");
+                        if (isIndex > 0)
+                        {
+                            string key = trimmed.Substring(0, isIndex).Trim();
+                            string valueStr = trimmed.Substring(isIndex + " is ".Length).Trim();
+
+                            // Convert value to appropriate type
+                            object value = ConvertToTypedValue(valueStr);
+                            data[key] = value;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Parse text in the old key-value format: "Key1: Value1\nKey2: Value2"
+    private static void ParseKeyValueFormat(string text, Dictionary<string, object> data, Dictionary<string, string> source)
+    {
+        string[] lines = text.Split('\n');
+
+        foreach (string line in lines)
+        {
+            int colonIndex = line.IndexOf(':');
+            if (colonIndex <= 0) continue;
+
+            string key = line.Substring(0, colonIndex).Trim();
+            string valueStr = line.Substring(colonIndex + 1).Trim();
+
+            // Handle worksheet and row number specially
+            if (key == "Worksheet")
+            {
+                // Format: "Worksheet: SheetName, Row: 123"
+                int commaIndex = valueStr.IndexOf(',');
+                if (commaIndex > 0)
+                {
+                    string worksheet = valueStr.Substring(0, commaIndex).Trim();
+                    source["_worksheet"] = worksheet;
+
+                    string rowPart = valueStr.Substring(commaIndex + 1).Trim();
+                    if (rowPart.StartsWith("Row: ") && int.TryParse(rowPart.Substring("Row: ".Length), out int rowNum))
+                    {
+                        source["_rowNumber"] = rowNum.ToString();
+                    }
+                }
+            }
+            // Handle metadata fields
+            else if (key.StartsWith("_"))
+            {
+                source[key] = valueStr;
+            }
+            // Handle regular data fields
+            else
+            {
+                // Convert value to appropriate type
+                object value = ConvertToTypedValue(valueStr);
+                data[key] = value;
+            }
+        }
+    }
+
+    // Convert string values to appropriate types
+    private static object ConvertToTypedValue(string valueStr)
+    {
+        // Handle null values
+        if (valueStr == "NULL" || string.IsNullOrEmpty(valueStr))
+        {
+            return null;
+        }
+
+        // Try to convert to boolean
+        if (bool.TryParse(valueStr, out bool boolValue))
+        {
+            return boolValue;
+        }
+
+        // Try to convert to integer
+        if (int.TryParse(valueStr, out int intValue))
+        {
+            return intValue;
+        }
+
+        // Try to convert to double
+        if (double.TryParse(valueStr, out double doubleValue))
+        {
+            return doubleValue;
+        }
+
+        // Default to string
+        return valueStr;
     }
 }
