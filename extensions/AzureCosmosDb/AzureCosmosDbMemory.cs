@@ -50,7 +50,8 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
         var containerProperties = AzureCosmosDbConfig.GetContainerProperties(index);
 
         // Define the vector field path
-        string vectorFieldPath = $"/{AzureCosmosDbMemoryRecord.VectorField}"; // "/embedding"
+        // Note: Even though constant is VectorField = "embedding", the actual property is Vector which serializes to "vector"
+        string vectorFieldPath = "/vector"; // Use the actual serialized field name
 
         // Define the vector embedding policy for the container
         var embeddings = new List<Microsoft.Azure.Cosmos.Embedding> // Specify the correct namespace
@@ -174,7 +175,7 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
         string text,
         ICollection<MemoryFilter>? filters = null,
         double minRelevance = 0,
-        int limit = 1,
+        int limit = 5, // Changed default to 5 to match tabular implementation
         bool withEmbeddings = false,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -184,19 +185,29 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
         // Prepare tag filters
         var (whereCondition, filterParameters) = WithTags("c", filters);
 
-        // Construct the vector search query using the root path
-        string vectorFieldQueryPath = $"c.{AzureCosmosDbMemoryRecord.VectorField}"; // Reverted path c.embedding
+        // Construct the vector search query using the correct vector field name
+        string vectorFieldQueryPath = $"c.vector"; // Use c.vector instead of c.embedding
+        
+        // Determine if we should use a limit
+        string topClause = limit > 0 ? $"TOP @limit" : "";
+        
         var sql = $"""
-                   SELECT TOP @limit
+                   SELECT {topClause}
                      {AzureCosmosDbMemoryRecord.Columns("c", withEmbeddings)}, VectorDistance({vectorFieldQueryPath}, @queryEmbedding) AS SimilarityScore
                    FROM c
                    {whereCondition}
-                   ORDER BY VectorDistance({vectorFieldQueryPath}, @queryEmbedding) ASC
-                   """; // ASC order because lower distance means higher similarity
+                   ORDER BY VectorDistance({vectorFieldQueryPath}, @queryEmbedding)
+                   """; // No ASC/DESC needed - VectorDistance automatically sorts from most similar to least similar
 
-        var queryDefinition = new QueryDefinition(sql)
-            .WithParameter("@limit", limit)
-            .WithParameter("@queryEmbedding", queryEmbedding.Data.ToArray()); // Pass embedding data array as parameter
+        var queryDefinition = new QueryDefinition(sql);
+        
+        // Only add the limit parameter if we're using a limit
+        if (limit > 0)
+        {
+            queryDefinition = queryDefinition.WithParameter("@limit", limit);
+        }
+        
+        queryDefinition = queryDefinition.WithParameter("@queryEmbedding", queryEmbedding.Data.ToArray()); // Pass embedding data array as parameter
 
         // Add filter parameters
         foreach (var (name, value) in filterParameters)
@@ -221,8 +232,24 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
             }
             catch (CosmosException ex) when (ex.Message.Contains("VectorDistance"))
             {
-                // Provide a more specific error if VectorDistance fails (e.g., index not configured correctly)
-                this._logger.LogError(ex, "Vector search failed. Ensure the vector index path '/{VectorField}' is correctly configured on container '{Index}'.", AzureCosmosDbMemoryRecord.VectorField, index); // Updated log message path
+                // Provide detailed error information for easier troubleshooting
+                this._logger.LogError(ex, 
+                    "Vector search failed on container '{Index}'. The vector index path '/vector' may not be properly configured. " +
+                    "Error details: {ErrorMessage}. " +
+                    "Make sure you have created a vector index on the 'vector' field in your Cosmos DB container.",
+                    index, ex.Message);
+                
+                Console.WriteLine("--- COSMOS DB VECTOR SEARCH ERROR ---");
+                Console.WriteLine($"Error Message: {ex.Message}");
+                Console.WriteLine($"Status Code: {ex.StatusCode}");
+                Console.WriteLine($"Activity ID: {ex.ActivityId}");
+                Console.WriteLine($"Request Charge: {ex.RequestCharge} RUs");
+                Console.WriteLine("Possible solutions:");
+                Console.WriteLine("1. Verify your Cosmos DB container has a vector index on the 'vector' field");
+                Console.WriteLine("2. Check that vectorization is enabled for your Cosmos DB account");
+                Console.WriteLine("3. Ensure vector dimensions match between stored data and queries");
+                Console.WriteLine("4. Confirm your Azure region supports vector search capabilities");
+                Console.WriteLine("--- END ERROR DETAILS ---");
                 // Re-throw or handle as appropriate, here we break the loop
                 yield break;
             }
@@ -251,22 +278,30 @@ internal sealed class AzureCosmosDbMemory : IMemoryDb
     public async IAsyncEnumerable<MemoryRecord> GetListAsync(
         string index,
         ICollection<MemoryFilter>? filters = null,
-        int limit = 1,
+        int limit = 5, // Changed default to 5 to match other methods
         bool withEmbeddings = false,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var (whereCondition, parameters) = WithTags("c", filters);
 
+        // Determine if we should use a limit
+        string topClause = limit > 0 ? $"TOP @limit" : "";
+        
         var sql = $"""
-                   SELECT Top @limit
+                   SELECT {topClause}
                      {AzureCosmosDbMemoryRecord.Columns("c", withEmbeddings)}
                    FROM
                      c
                    {whereCondition}
-                   """; // Using @limit instead of @topN for consistency
+                   """;
 
-        var queryDefinition = new QueryDefinition(sql)
-            .WithParameter("@limit", limit);
+        var queryDefinition = new QueryDefinition(sql);
+        
+        // Only add the limit parameter if we're using a limit
+        if (limit > 0)
+        {
+            queryDefinition = queryDefinition.WithParameter("@limit", limit);
+        }
         foreach (var (name, value) in parameters)
         {
             queryDefinition = queryDefinition.WithParameter(name, value);

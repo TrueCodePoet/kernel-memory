@@ -51,7 +51,7 @@ public static class DependencyInjection
                 SerializerOptions = new CosmosSerializationOptions
                 {
                     PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase
-                }
+                }             
             });
 
         // Register the memory DB implementation

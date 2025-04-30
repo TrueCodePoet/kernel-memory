@@ -78,3 +78,13 @@ Memory records are stored with the following structure:
 - `tags`: Collection of metadata tags.
 - `embedding`: Vector representation of the memory content, indexed for vector search.
 - `payload`: Additional data associated with the memory record.
+
+## Best Practices and Lessons Learned
+
+- **Unique IDs per Record:** Always assign a unique `Id` to each `MemoryRecord`. If the same document ID is reused, only one record will be stored per document, and previous records will be overwritten.
+- **Partition Key:** Use a meaningful partition key (e.g., file/document name or logical grouping) to enable efficient queries and scaling.
+- **Batching:** While the standard extension does not natively support Cosmos DB `TransactionalBatch`, you can parallelize inserts for higher throughput. For large-scale ingestion, consider batching records by partition key and using parallel tasks.
+- **Error Handling:** Monitor for rate limiting (HTTP 429) and implement retry logic or reduce concurrency if needed.
+- **Metadata:** Include relevant metadata in the `tags` and `payload` fields for advanced querying and traceability.
+
+**Note:** For advanced tabular data scenarios (Excel/CSV), see the `AzureCosmosDbTabular` extension, which supports structured data, schema management, and batch ingestion.
